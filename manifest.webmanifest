@@ -1,0 +1,19 @@
+{
+  "name": "RetirePilot · 퇴직연금 운용",
+  "short_name": "RetirePilot",
+  "description": "퇴직연금 보유상품과 운용 제안을 확인하는 반자동 운용 도우미",
+  "lang": "ko-KR",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f5f7f7",
+  "theme_color": "#0d2232",
+  "icons": [
+    {
+      "src": "app-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
