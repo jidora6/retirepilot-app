@@ -6,7 +6,9 @@ const WOORI_PUBLIC_TDF_STORAGE_KEY = 'retirepilot-woori-public-tdf';
 const runtimeConfig = window.RETIREPILOT_CONFIG || {};
 const hostedMode = Boolean(runtimeConfig.supabaseUrl && runtimeConfig.supabasePublishableKey && runtimeConfig.functionUrl);
 const AUTH_STORAGE_KEY = 'retirepilot-auth-session';
+const VIEW_STORAGE_KEY = 'retirepilot-active-view';
 const HOLDINGS_EXPORT_VERSION = 1;
+const VIEW_TITLES = { overview: '전체 현황', accounts: '내 계좌', limits: '퇴직연금 한도 검사', products: '매수 상품 검색', recommendations: '운용 제안' };
 const EMPTY_PORTFOLIO = {
   accounts: [
     { id: 'k-invest', name: '한국투자증권 IRP' },
@@ -179,7 +181,7 @@ async function logoutPrivateSession(options = {}) {
   if ($('#woori-paste-input')) $('#woori-paste-input').value = '';
   if ($('#catalog-query')) $('#catalog-query').value = '';
   document.querySelectorAll('.account-tab').forEach(tab => tab.classList.toggle('active', tab.dataset.account === 'all'));
-  switchView('overview');
+  switchView('overview', { persist: false });
   render();
   updateAuthPanel();
   if (hostedMode) {
@@ -194,15 +196,14 @@ async function logoutPrivateSession(options = {}) {
 }
 
 function updateAuthPanel() {
+  document.body.classList.remove('auth-pending');
   let panel = $('#auth-panel');
   if (!panel && hostedMode) {
-    const sync = $('.account-sync');
-    if (!sync?.parentElement) return;
     panel = document.createElement('div');
     panel.id = 'auth-panel';
-    panel.className = 'catalog-notice auth-panel';
-    panel.innerHTML = '<strong>운영 계정 로그인</strong><p id="auth-status">Supabase 계정으로 로그인하세요.</p><form id="auth-form" autocomplete="off"><label>이메일<input name="email" type="email" required autocomplete="username"></label><label>비밀번호<input name="password" type="password" required autocomplete="current-password"></label><button class="primary-btn" id="auth-submit" type="submit">로그인</button></form><button class="outline-btn" id="auth-logout" type="button" hidden>로그아웃</button>';
-    sync.parentElement.insertBefore(panel, sync);
+    panel.className = 'auth-gate';
+    panel.innerHTML = '<div class="auth-gate-card"><div class="auth-brand"><span class="brand-mark">R</span><div><strong>RetirePilot</strong><small>PRIVATE WORKSPACE</small></div></div><h1>퇴직연금 계정 로그인</h1><p id="auth-status">Supabase 계정으로 로그인하세요.</p><form id="auth-form" autocomplete="off"><label>이메일<input name="email" type="email" required autocomplete="username"></label><label>비밀번호<input name="password" type="password" required autocomplete="current-password"></label><button class="primary-btn" id="auth-submit" type="submit">로그인</button></form><small class="auth-note">계좌·보유상품·운용 제안은 로그인 후에만 표시됩니다.</small></div>';
+    document.body.append(panel);
     panel.querySelector('#auth-form').addEventListener('submit', async event => {
       event.preventDefault();
       const form = event.currentTarget;
@@ -215,6 +216,7 @@ function updateAuthPanel() {
         saveAuthSession({ ...result, expires_at: Math.floor(Date.now() / 1000) + Number(result.expires_in || 3600) });
         form.reset();
         await loadSupabaseHoldings();
+        switchView(loadSavedView());
         maybeOfferLocalMigration();
         if (await checkKisConnection()) await refreshKisHoldings({ quiet: true });
       } catch (error) {
@@ -223,18 +225,28 @@ function updateAuthPanel() {
         button.disabled = false;
       }
     });
-    panel.querySelector('#auth-logout').addEventListener('click', () => { void logoutPrivateSession(); });
   }
   if (!panel) return;
   panel.hidden = !hostedMode;
   if (!hostedMode) return;
   const form = $('#auth-form');
   const status = $('#auth-status');
-  const logout = $('#auth-logout');
+  const logout = $('#auth-session-btn');
   const signedIn = Boolean(authSession?.access_token);
-  form.hidden = signedIn;
-  logout.hidden = !signedIn;
-  status.textContent = signedIn ? '운영 계정으로 로그인됨 · KIS 키는 서버에만 있습니다.' : '잔고 미리보기를 사용하려면 본인 Supabase 계정으로 로그인하세요.';
+  panel.hidden = signedIn;
+  document.body.classList.toggle('auth-locked', !signedIn);
+  if (form) form.hidden = signedIn;
+  if (logout) logout.hidden = !signedIn;
+  status.textContent = signedIn ? '운영 계정으로 로그인됨 · KIS 키는 서버에만 있습니다.' : '본인 Supabase 계정으로 로그인하세요.';
+}
+
+function loadSavedView() {
+  try {
+    const view = sessionStorage.getItem(VIEW_STORAGE_KEY);
+    return VIEW_TITLES[view] ? view : 'overview';
+  } catch (_) {
+    return 'overview';
+  }
 }
 
 async function authRequest(path, body) {
@@ -1215,7 +1227,11 @@ function renderCatalog() {
     const query = $('#catalog-query').value.trim().toLocaleLowerCase('ko-KR');
     const matches = items.filter(item => !query || `${item.name} ${item.code} ${item.category || ''} ${item.manager || ''}`.toLocaleLowerCase('ko-KR').includes(query));
     count.textContent = isPublicList ? `${matches.length}개 검색됨 · 공개 TDF` : `확인한 후보 ${matches.length}개`;
-    list.innerHTML = matches.slice(0, 100).map(item => `<article class="catalog-card"><div><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.code || '상품코드 미확인')} · ${escapeHtml(item.category || '우리은행 DC 확인 후보')}</span></div><div class="catalog-card-right"><span class="status-tag ${isPublicList ? 'info' : 'good'}">${isPublicList ? '회사 라인업 확인 필요' : '후보 검토 가능'}</span><small>${isPublicList ? `1년 ${escapeHtml(item.oneYear || '—')}% · 총보수 ${escapeHtml(item.fee || '—')}%` : '실제 주문 전 확인'}</small></div></article>`).join('') || '<div class="empty-state">등록된 상품이 없거나 검색 결과가 없습니다.</div>';
+    list.innerHTML = matches.slice(0, 100).map(item => {
+      const detailKey = item.code || `fund:${item.name}`;
+      const attributes = `data-product-detail="${escapeHtml(detailKey)}" data-product-name="${escapeHtml(item.name)}" data-product-category="${escapeHtml(item.category || '우리은행 DC 확인 후보')}" data-product-fee="${escapeHtml(item.fee || '')}" data-product-one-month="${escapeHtml(item.oneMonth ?? '')}" data-product-three-months="${escapeHtml(item.threeMonth ?? item.threeMonths ?? '')}" data-product-six-months="${escapeHtml(item.sixMonth ?? item.sixMonths ?? '')}" data-proposal-account="woori-dc"`;
+      return `<button class="catalog-card catalog-card-button" type="button" ${attributes}><div><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.code || '상품코드 미확인')} · ${escapeHtml(item.category || '우리은행 DC 확인 후보')}</span></div><div class="catalog-card-right"><span class="status-tag ${isPublicList ? 'info' : 'good'}">${isPublicList ? '회사 라인업 확인 필요' : '후보 검토 가능'}</span><small>${isPublicList ? `1년 ${escapeHtml(item.oneYear || '—')}% · 총보수 ${escapeHtml(item.fee || '—')}%` : '상세 정보 보기'}</small></div></button>`;
+    }).join('') || '<div class="empty-state">등록된 상품이 없거나 검색 결과가 없습니다.</div>';
     if (matches.length > 100) list.insertAdjacentHTML('beforeend', '<p class="catalog-more">처음 100개만 표시됩니다. 목표연도나 상품명으로 검색 범위를 좁혀주세요.</p>');
     return;
   }
@@ -1231,7 +1247,7 @@ function renderCatalog() {
   const kind = $('#catalog-kind').value;
   const matches = catalog.items.filter(item => (kind === 'all' || item.kind === kind) && (!query || `${item.name} ${item.code} ${item.category} ${item.manager}`.toLocaleLowerCase('ko-KR').includes(query)));
   count.textContent = `${matches.length.toLocaleString('ko-KR')}개 검색됨 · 전체 ${catalog.items.length.toLocaleString('ko-KR')}개`;
-  list.innerHTML = matches.slice(0, 100).map(item => `<article class="catalog-card"><div><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.code)} · ${escapeHtml(item.kind)}${item.category ? ' · ' + escapeHtml(item.category) : ''}</span></div><div class="catalog-card-right"><span class="status-tag info">주문 가능 미확인</span><small>${item.fee === null ? '보수 미표기' : '총보수 ' + Number(item.fee).toFixed(2) + '%'}</small></div></article>`).join('') || '<div class="empty-state">검색 결과가 없습니다.</div>';
+  list.innerHTML = matches.slice(0, 100).map(item => `<button class="catalog-card catalog-card-button" type="button" data-product-detail="${escapeHtml(item.code)}" data-product-name="${escapeHtml(item.name)}" data-product-category="${escapeHtml(item.category || item.kind || '상품 분류 확인 필요')}" data-product-fee="${escapeHtml(item.fee === null ? '' : Number(item.fee).toFixed(2) + '%')}" data-proposal-account="k-invest"><div><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.code)} · ${escapeHtml(item.kind)}${item.category ? ' · ' + escapeHtml(item.category) : ''}</span></div><div class="catalog-card-right"><span class="status-tag info">주문 가능 미확인</span><small>${item.fee === null ? '보수 미표기' : '총보수 ' + Number(item.fee).toFixed(2) + '%'} · 상세 보기</small></div></button>`).join('') || '<div class="empty-state">검색 결과가 없습니다.</div>';
   if (matches.length > 100) list.insertAdjacentHTML('beforeend', '<p class="catalog-more">처음 100개만 표시됩니다. 상품명이나 코드로 검색 범위를 좁혀주세요.</p>');
 }
 
@@ -1316,14 +1332,37 @@ async function refreshKisTrends({ quiet = false } = {}) {
   }
 }
 
-function switchView(view) {
+function switchView(view, { persist = true } = {}) {
+  if (!VIEW_TITLES[view]) view = 'overview';
   document.querySelectorAll('.view').forEach(element => element.classList.toggle('active', element.id === 'view-' + view));
   document.querySelectorAll('.nav-item[data-view]').forEach(element => element.classList.toggle('active', element.dataset.view === view));
-  $('#page-title').textContent = { overview: '전체 현황', accounts: '내 계좌', limits: '퇴직연금 한도 검사', products: '매수 상품 검색', recommendations: '운용 제안' }[view];
+  $('#page-title').textContent = VIEW_TITLES[view];
+  if (persist) {
+    try { sessionStorage.setItem(VIEW_STORAGE_KEY, view); }
+    catch (_) { /* View persistence is optional. */ }
+  }
+  window.scrollTo({ top: 0, behavior: 'auto' });
 }
 
 function insightRate(value) {
   return Number.isFinite(value) ? signed(value) : '데이터 부족';
+}
+
+function productProfile(context) {
+  const known = productProfiles[context.code];
+  if (known) return known;
+  const item = (window.KIS_CATALOG?.items || []).find(candidate => candidate.code === context.code)
+    || (wooriCatalogue.items || []).find(candidate => candidate.code === context.code)
+    || (wooriPublicTdf.items || []).find(candidate => candidate.code === context.code);
+  return {
+    name: context.name || item?.name || context.code || '상품 상세',
+    code: context.code?.startsWith('fund:') ? '상품코드 미확인' : context.code || item?.code || '상품코드 미확인',
+    fee: context.fee || (Number.isFinite(Number(item?.fee)) ? `${Number(item.fee).toFixed(2)}%` : '공식 정보 확인'),
+    category: context.category || item?.category || item?.kind || '상품 분류 확인 필요',
+    strategy: '최근 가격 흐름과 기간별 수익률을 함께 확인하세요. 상품의 실제 운용전략은 금융기관 상품설명서에서 최종 확인해야 합니다.',
+    risk: '과거 수익률은 미래 성과를 보장하지 않으며 원금 손실이 발생할 수 있습니다.',
+    source: context.source || window.KIS_CATALOG?.source || '',
+  };
 }
 
 function candleChart(candles = []) {
@@ -1358,8 +1397,7 @@ function renderProductDetailModal() {
   }
   if (!productDetailContext) return;
   const context = productDetailContext;
-  const profile = productProfiles[context.code];
-  if (!profile) return;
+  const profile = productProfile(context);
   const account = context.account || 'k-invest';
   const accountValue = accountTotal(account);
   const amount = Math.min(Math.max(Number(context.amount || 0), 0), accountValue);
@@ -1368,20 +1406,22 @@ function renderProductDetailModal() {
   const insight = productInsightCache.get(context.code);
   const loading = insight === undefined;
   const failed = insight?.error;
-  const metrics = insight?.periods || {};
+  const metrics = insight?.periods || context.periods || {};
   const currentTarget = visibleHoldings().find(item => item.code === context.code);
   const currentTargetValue = currentTarget?.value || 0;
   const afterTargetValue = currentTargetValue + amount;
-  const tdfLimit = limitLabels['qualified-tdf'];
+  const tdfLimit = context.code === '442560' ? limitLabels['qualified-tdf'] : '금융기관 주문 화면에서 확인';
+  const sourceLink = profile.source ? ` · <a href="${escapeHtml(profile.source)}" target="_blank" rel="noopener noreferrer">공식 정보 ↗</a>` : '';
+  const proposalSection = context.from || amount ? `<section class="detail-section"><div class="detail-section-head"><span>4</span><div><h3>내 계좌에 반영하면</h3><p>아래는 주문이 아닌, 현재 제안 금액으로 계산한 가상 교체 결과입니다.</p></div></div><div class="detail-allocation"><div><small>교체 금액</small><b>${won(amount)}</b><span>${escapeHtml(accountName(account))}의 ${beforeWeight.toFixed(1)}%</span></div><div><small>줄일 상품</small><b>${escapeHtml(context.from || '—')}</b><span>제안 금액만큼 축소 가정</span></div><div><small>새 상품 비중</small><b>${accountValue ? (afterTargetValue / accountValue * 100).toFixed(1) + '%' : '—'}</b><span>현재 ${currentTargetValue ? won(currentTargetValue) : '0원'} → 교체 후 ${won(afterTargetValue)}</span></div></div>${fromHolding ? `<p class="detail-note">${escapeHtml(fromHolding.name)}의 현재 계좌 비중은 ${weight(fromHolding).toFixed(1)}%입니다. 이 제안은 전량 매도가 아니라 ${won(amount)}만 부분 교체하는 가정입니다.</p>` : ''}</section>` : '';
   modal.innerHTML = `<div class="modal-card product-detail-card" role="dialog" aria-modal="true" aria-labelledby="product-detail-title">
     <button class="modal-close" type="button" data-close-product-detail aria-label="닫기">×</button>
-    <span class="detail-kicker">교체 제안 · 판단 정보</span>
+    <span class="detail-kicker">${context.from || amount ? '교체 제안 · 판단 정보' : '매수상품 · 상세 정보'}</span>
     <h2 id="product-detail-title">${escapeHtml(profile.name)}</h2>
-    <p class="detail-subtitle">${escapeHtml(profile.code)} · ${escapeHtml(profile.category)} · <a href="${escapeHtml(profile.source)}" target="_blank" rel="noopener noreferrer">운용사 공식 정보 ↗</a></p>
-    <section class="detail-section"><div class="detail-section-head"><span>1</span><div><h3>가격 추세</h3><p>최근 30거래일 일봉입니다. 상승·하락 자체보다 5·10·20일 흐름을 함께 봅니다.</p></div></div>${loading ? '<div class="detail-loading">가격 조회 중…</div>' : failed ? `<div class="detail-chart-empty">${escapeHtml(insight.error)}</div>` : candleChart(insight?.candles)}</section>
+    <p class="detail-subtitle">${escapeHtml(profile.code)} · ${escapeHtml(profile.category)}${sourceLink}</p>
+    <section class="detail-section"><div class="detail-section-head"><span>1</span><div><h3>가격 추세</h3><p>최근 30거래일 일봉입니다. 상장상품이 아닌 펀드는 일봉 차트가 제공되지 않을 수 있습니다.</p></div></div>${loading ? '<div class="detail-loading">가격 조회 중…</div>' : failed ? `<div class="detail-chart-empty">${escapeHtml(insight.error)}</div>` : insight?.candles?.length ? candleChart(insight.candles) : '<div class="detail-chart-empty">이 상품은 조회 가능한 시장 가격 차트가 없습니다.</div>'}</section>
     <section class="detail-section"><div class="detail-section-head"><span>2</span><div><h3>기간 수익률·변동 확인</h3><p>단기 수익률만 보고 교체하지 않고, 1·3·6개월 흐름을 비교합니다.</p></div></div><div class="detail-stats"><div><small>1개월</small><b>${loading ? '조회 중' : insightRate(metrics.oneMonth)}</b></div><div><small>3개월</small><b>${loading ? '조회 중' : insightRate(metrics.threeMonths)}</b></div><div><small>6개월</small><b>${loading ? '조회 중' : insightRate(metrics.sixMonths)}</b></div></div></section>
     <section class="detail-section"><div class="detail-section-head"><span>3</span><div><h3>무엇을 사는지</h3><p>${escapeHtml(profile.strategy)}</p></div></div><div class="detail-facts"><div><small>총보수</small><b>${escapeHtml(profile.fee)}</b></div><div><small>한도 분류</small><b>${escapeHtml(tdfLimit)}</b></div><div><small>핵심 위험</small><b>${escapeHtml(profile.risk)}</b></div></div></section>
-    <section class="detail-section"><div class="detail-section-head"><span>4</span><div><h3>내 계좌에 반영하면</h3><p>아래는 주문이 아닌, 현재 제안 금액으로 계산한 가상 교체 결과입니다.</p></div></div><div class="detail-allocation"><div><small>교체 금액</small><b>${won(amount)}</b><span>${escapeHtml(accountName(account))}의 ${beforeWeight.toFixed(1)}%</span></div><div><small>줄일 상품</small><b>${escapeHtml(context.from || '—')}</b><span>제안 금액만큼 축소 가정</span></div><div><small>새 TDF 비중</small><b>${accountValue ? (afterTargetValue / accountValue * 100).toFixed(1) + '%' : '—'}</b><span>현재 ${currentTargetValue ? won(currentTargetValue) : '0원'} → 교체 후 ${won(afterTargetValue)}</span></div></div>${fromHolding ? `<p class="detail-note">${escapeHtml(fromHolding.name)}의 현재 계좌 비중은 ${weight(fromHolding).toFixed(1)}%입니다. 이 제안은 전량 매도가 아니라 ${won(amount)}만 부분 교체하는 가정입니다.</p>` : ''}</section>
+    ${proposalSection}
     <p class="detail-disclaimer">가격·수익률은 조회 시점 정보이며 미래 수익을 보장하지 않습니다. 실제 매수 가능 여부와 적격 TDF 분류는 한국투자증권 주문 화면에서 최종 확인하세요.</p>
   </div>`;
   modal.classList.add('open');
@@ -1392,6 +1432,16 @@ async function openProductDetail(context) {
   productDetailContext = context;
   renderProductDetailModal();
   if (productInsightCache.has(context.code)) return;
+  if (context.periods && !/^[0-9A-Z]{6}$/.test(context.code || '')) {
+    productInsightCache.set(context.code || context.name, { candles: [], periods: context.periods });
+    renderProductDetailModal();
+    return;
+  }
+  if (!/^[0-9A-Z]{6}$/.test(context.code || '')) {
+    productInsightCache.set(context.code || context.name, { candles: [], periods: context.periods || {} });
+    renderProductDetailModal();
+    return;
+  }
   try {
     const response = await fetchKisProductInsight(context.code);
     const result = await response.json();
@@ -1467,11 +1517,25 @@ document.addEventListener('click', event => {
   }
   const detail = event.target.closest('[data-product-detail]');
   if (detail) {
+    const periodValue = name => {
+      const raw = detail.dataset[name];
+      if (raw === undefined || raw === '') return undefined;
+      const value = Number(raw);
+      return Number.isFinite(value) ? value : undefined;
+    };
     openProductDetail({
       code: detail.dataset.productDetail,
+      name: detail.dataset.productName,
+      category: detail.dataset.productCategory,
+      fee: detail.dataset.productFee,
       from: detail.dataset.proposalFrom,
       amount: Number(detail.dataset.proposalAmount || 0),
       account: detail.dataset.proposalAccount,
+      periods: {
+        oneMonth: periodValue('productOneMonth'),
+        threeMonths: periodValue('productThreeMonths'),
+        sixMonths: periodValue('productSixMonths'),
+      },
     });
   }
   const wooriImport = event.target.closest('[data-woori-import]');
@@ -1565,6 +1629,8 @@ installHoldingTransferPanel();
 loadAuthSession();
 updateAuthPanel();
 render();
+switchView(loadSavedView());
+$('#auth-session-btn')?.addEventListener('click', () => { void logoutPrivateSession(); });
 checkKisConnection().then(async ready => {
   if (hostedMode && ready) {
     try {
