@@ -170,13 +170,15 @@ async function logoutPrivateSession(options = {}) {
   wooriCatalogue = { items: [], importedAt: null };
   wooriPublicTdf = { items: [], fetchedAt: null };
   productInsightCache.clear();
+  productDetailContext?.trigger?.setAttribute?.('aria-expanded', 'false');
+  productDetailContext?.trigger?.classList?.remove?.('detail-open');
   productDetailContext = null;
   overviewDetail = null;
   wooriImportMode = null;
   editingId = null;
   filter = 'all';
   document.querySelectorAll('.modal.open').forEach(modal => modal.classList.remove('open'));
-  $('#product-detail-modal')?.replaceChildren();
+  $('#product-detail-panel')?.remove();
   $('#product-form')?.reset();
   if ($('#woori-paste-input')) $('#woori-paste-input').value = '';
   if ($('#catalog-query')) $('#catalog-query').value = '';
@@ -802,23 +804,29 @@ function renderTotals() {
     : 'var(--line)';
   $('#profit-count').textContent = visibleHoldings().filter(item => item.return > 0).length + '개';
   $('#loss-count').textContent = visibleHoldings().filter(item => item.return < 0).length + '개';
-  document.querySelector('.metric-card.dark .metric-foot em').textContent = kisSnapshot ? 'KIS 자동 조회 포함' : '직접 입력 기준';
 }
 
 function renderOverviewDetail() {
   const host = $('#overview-detail');
   if (!host) return;
-  if (!overviewDetail) { host.hidden = true; host.innerHTML = ''; return; }
+  if (!overviewDetail) {
+    host.hidden = true;
+    host.innerHTML = '';
+    $('.metric-grid')?.insertAdjacentElement('afterend', host);
+    return;
+  }
+  const trigger = [...document.querySelectorAll('[data-overview-detail]')].find(element => element.dataset.overviewDetail === overviewDetail);
+  trigger?.insertAdjacentElement('afterend', host);
   host.hidden = false;
   const holdings = visibleHoldings();
   if (overviewDetail === 'recommendations') {
     const items = recommendations();
-    host.innerHTML = `<div class="overview-detail-head"><h3>확인할 제안</h3><button class="text-btn" data-view-link="recommendations">운용 제안으로 보기 →</button></div>${items.map(item => `<div class="overview-detail-row"><div><strong>${escapeHtml(item.title)}</strong><small>운용 제안 · ${escapeHtml(item.meta?.[0]?.[1] || '검토 필요')}</small></div><span class="status-tag info">검토</span></div>`).join('') || '<div class="empty-state">현재 제안이 없습니다.</div>'}`;
+    host.innerHTML = `<div class="overview-detail-head"><h3>확인할 제안</h3><div><button class="text-btn" data-view-link="recommendations">운용 제안으로 보기 →</button><button class="inline-close" type="button" data-close-overview-detail aria-label="상세 닫기">×</button></div></div>${items.map(item => `<div class="overview-detail-row"><div><strong>${escapeHtml(item.title)}</strong><small>운용 제안 · ${escapeHtml(item.meta?.[0]?.[1] || '검토 필요')}</small></div><span class="status-tag info">검토</span></div>`).join('') || '<div class="empty-state">현재 제안이 없습니다.</div>'}`;
     return;
   }
   const labels = { all: '전체 보유 상품', profit: '수익 중인 상품', loss: '손실 중인 상품' };
   const filtered = holdings.filter(item => overviewDetail === 'all' || (overviewDetail === 'profit' ? item.return > 0 : item.return < 0));
-  host.innerHTML = `<div class="overview-detail-head"><h3>${labels[overviewDetail]}</h3><button class="text-btn" data-view-link="accounts">내 계좌에서 보기 →</button></div>${filtered.map(item => `<div class="overview-detail-row"><div><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(accountName(item.account))} · ${escapeHtml(displayType(item))}</small></div><div><b class="${item.return >= 0 ? 'return-positive' : 'return-negative'}">${signed(item.return)}</b><small>${won(item.value)}</small></div></div>`).join('') || '<div class="empty-state">표시할 상품이 없습니다.</div>'}`;
+  host.innerHTML = `<div class="overview-detail-head"><h3>${labels[overviewDetail]}</h3><div><button class="text-btn" data-view-link="accounts">내 계좌에서 보기 →</button><button class="inline-close" type="button" data-close-overview-detail aria-label="상세 닫기">×</button></div></div>${filtered.map(item => `<div class="overview-detail-row"><div><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(accountName(item.account))} · ${escapeHtml(displayType(item))}</small></div><div><b class="${item.return >= 0 ? 'return-positive' : 'return-negative'}">${signed(item.return)}</b><small>${won(item.value)}</small></div></div>`).join('') || '<div class="empty-state">표시할 상품이 없습니다.</div>'}`;
 }
 
 function renderHoldings() {
@@ -1387,16 +1395,18 @@ function candleChart(candles = []) {
   return `<div class="detail-chart"><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="최근 ${candles.length}거래일 일봉 차트">${bars}</svg><div><span>${escapeHtml(first)}</span><span>${escapeHtml(last)}</span></div></div>`;
 }
 
-function renderProductDetailModal() {
-  let modal = $('#product-detail-modal');
-  if (!modal) {
-    modal = document.createElement('div');
-    modal.id = 'product-detail-modal';
-    modal.className = 'modal';
-    document.body.append(modal);
+function renderProductDetailPanel() {
+  if (!productDetailContext?.trigger?.isConnected) return;
+  let panel = $('#product-detail-panel');
+  if (!panel) {
+    panel = document.createElement('section');
+    panel.id = 'product-detail-panel';
+    panel.className = 'product-detail-inline';
   }
-  if (!productDetailContext) return;
   const context = productDetailContext;
+  context.trigger.insertAdjacentElement('afterend', panel);
+  context.trigger.classList.add('detail-open');
+  context.trigger.setAttribute('aria-expanded', 'true');
   const profile = productProfile(context);
   const account = context.account || 'k-invest';
   const accountValue = accountTotal(account);
@@ -1413,7 +1423,7 @@ function renderProductDetailModal() {
   const tdfLimit = context.code === '442560' ? limitLabels['qualified-tdf'] : '금융기관 주문 화면에서 확인';
   const sourceLink = profile.source ? ` · <a href="${escapeHtml(profile.source)}" target="_blank" rel="noopener noreferrer">공식 정보 ↗</a>` : '';
   const proposalSection = context.from || amount ? `<section class="detail-section"><div class="detail-section-head"><span>4</span><div><h3>내 계좌에 반영하면</h3><p>아래는 주문이 아닌, 현재 제안 금액으로 계산한 가상 교체 결과입니다.</p></div></div><div class="detail-allocation"><div><small>교체 금액</small><b>${won(amount)}</b><span>${escapeHtml(accountName(account))}의 ${beforeWeight.toFixed(1)}%</span></div><div><small>줄일 상품</small><b>${escapeHtml(context.from || '—')}</b><span>제안 금액만큼 축소 가정</span></div><div><small>새 상품 비중</small><b>${accountValue ? (afterTargetValue / accountValue * 100).toFixed(1) + '%' : '—'}</b><span>현재 ${currentTargetValue ? won(currentTargetValue) : '0원'} → 교체 후 ${won(afterTargetValue)}</span></div></div>${fromHolding ? `<p class="detail-note">${escapeHtml(fromHolding.name)}의 현재 계좌 비중은 ${weight(fromHolding).toFixed(1)}%입니다. 이 제안은 전량 매도가 아니라 ${won(amount)}만 부분 교체하는 가정입니다.</p>` : ''}</section>` : '';
-  modal.innerHTML = `<div class="modal-card product-detail-card" role="dialog" aria-modal="true" aria-labelledby="product-detail-title">
+  panel.innerHTML = `<div class="product-detail-card" role="region" aria-labelledby="product-detail-title">
     <button class="modal-close" type="button" data-close-product-detail aria-label="닫기">×</button>
     <span class="detail-kicker">${context.from || amount ? '교체 제안 · 판단 정보' : '매수상품 · 상세 정보'}</span>
     <h2 id="product-detail-title">${escapeHtml(profile.name)}</h2>
@@ -1424,22 +1434,26 @@ function renderProductDetailModal() {
     ${proposalSection}
     <p class="detail-disclaimer">가격·수익률은 조회 시점 정보이며 미래 수익을 보장하지 않습니다. 실제 매수 가능 여부와 적격 TDF 분류는 한국투자증권 주문 화면에서 최종 확인하세요.</p>
   </div>`;
-  modal.classList.add('open');
 }
 
 async function openProductDetail(context) {
+  if (productDetailContext?.trigger === context.trigger) {
+    closeProductDetail();
+    return;
+  }
+  closeProductDetail();
   const generation = authGeneration;
   productDetailContext = context;
-  renderProductDetailModal();
+  renderProductDetailPanel();
   if (productInsightCache.has(context.code)) return;
   if (context.periods && !/^[0-9A-Z]{6}$/.test(context.code || '')) {
     productInsightCache.set(context.code || context.name, { candles: [], periods: context.periods });
-    renderProductDetailModal();
+    renderProductDetailPanel();
     return;
   }
   if (!/^[0-9A-Z]{6}$/.test(context.code || '')) {
     productInsightCache.set(context.code || context.name, { candles: [], periods: context.periods || {} });
-    renderProductDetailModal();
+    renderProductDetailPanel();
     return;
   }
   try {
@@ -1453,11 +1467,13 @@ async function openProductDetail(context) {
     if (generation !== authGeneration) return;
     productInsightCache.set(context.code, { error: `가격 정보 조회 실패: ${error.message}` });
   }
-  if (productDetailContext?.code === context.code) renderProductDetailModal();
+  if (productDetailContext?.trigger === context.trigger) renderProductDetailPanel();
 }
 
 function closeProductDetail() {
-  $('#product-detail-modal')?.classList.remove('open');
+  productDetailContext?.trigger?.setAttribute?.('aria-expanded', 'false');
+  productDetailContext?.trigger?.classList?.remove?.('detail-open');
+  $('#product-detail-panel')?.remove();
   productDetailContext = null;
 }
 
@@ -1524,6 +1540,7 @@ document.addEventListener('click', event => {
       return Number.isFinite(value) ? value : undefined;
     };
     openProductDetail({
+      trigger: detail,
       code: detail.dataset.productDetail,
       name: detail.dataset.productName,
       category: detail.dataset.productCategory,
@@ -1571,14 +1588,26 @@ document.addEventListener('click', event => {
   const metric = event.target.closest('[data-overview-detail]');
   if (metric) {
     overviewDetail = overviewDetail === metric.dataset.overviewDetail ? null : metric.dataset.overviewDetail;
-    document.querySelectorAll('[data-overview-detail]').forEach(element => element.classList.toggle('active', element === metric && overviewDetail));
+    document.querySelectorAll('[data-overview-detail]').forEach(element => {
+      const expanded = element === metric && Boolean(overviewDetail);
+      element.classList.toggle('active', expanded);
+      element.setAttribute('aria-expanded', String(expanded));
+    });
+    renderOverviewDetail();
+  }
+  if (event.target.closest('[data-close-overview-detail]')) {
+    overviewDetail = null;
+    document.querySelectorAll('[data-overview-detail]').forEach(element => {
+      element.classList.remove('active');
+      element.setAttribute('aria-expanded', 'false');
+    });
     renderOverviewDetail();
   }
   if (event.target.closest('#add-product-btn')) openProductModal();
   const edit = event.target.closest('[data-edit]');
   if (edit && !edit.disabled) openProductModal(edit.dataset.edit);
   if (event.target.closest('[data-close-modal]') || event.target.id === 'product-modal') closeProductModal();
-  if (event.target.closest('[data-close-product-detail]') || event.target.id === 'product-detail-modal') closeProductDetail();
+  if (event.target.closest('[data-close-product-detail]')) closeProductDetail();
 });
 
 $('#product-form').addEventListener('submit', async event => {
