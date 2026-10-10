@@ -50,3 +50,7 @@
 @media(max-width:420px){.metric-card{min-height:108px}.overview-detail-head{align-items:flex-start;gap:10px}.overview-detail-head>div{gap:8px}.overview-detail-head .text-btn{text-align:right}.product-detail-inline{margin-bottom:9px}}
 @media(prefers-reduced-motion:reduce){.metric-grid>.overview-detail,.product-detail-inline{animation:none}}
 @media(max-width:420px){.metric-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.metric-card{min-height:96px;padding:11px 12px}.metric-top{gap:5px}.metric-top>span:first-child{font-size:10px}.metric-icon{width:22px;height:22px}.metric-card strong{font-size:18px;margin:9px 0 6px}.metric-foot em{font-size:9px}.metric-grid>.overview-detail{grid-column:1/-1}}
+
+/* Keep analyzed product returns inside narrow cards. */
+.catalog-card-row{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:'main compare' 'performance performance';align-items:center}.catalog-card-row>.catalog-card-main{grid-area:main}.catalog-card-row>.compare-toggle{grid-area:compare}.catalog-card-row>.catalog-performance{grid-area:performance;order:initial;min-width:0;width:auto}
+@media(max-width:700px){.catalog-card-row{grid-template-columns:minmax(0,1fr);grid-template-areas:'main' 'performance' 'compare';align-items:stretch}.catalog-card-row>.catalog-card-main{width:auto;min-width:0;flex:none}.catalog-card-row>.catalog-performance{width:auto;min-width:0;margin:0}.catalog-card-row>.compare-toggle{width:100%}}
