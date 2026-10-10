@@ -44,6 +44,7 @@ let overviewDetail = null;
 let productDetailContext = null;
 let productInsightCache = new Map();
 let catalogComparison = [];
+let catalogPerformance = { account: '', codes: new Set(), loading: false, error: '', fetchedAt: '' };
 let wooriImportMode = null;
 let pendingHoldingImport = null;
 let migrationPromptDismissed = false;
@@ -172,6 +173,7 @@ async function logoutPrivateSession(options = {}) {
   wooriPublicTdf = { items: [], fetchedAt: null };
   productInsightCache.clear();
   catalogComparison = [];
+  catalogPerformance = { account: '', codes: new Set(), loading: false, error: '', fetchedAt: '' };
   productDetailContext?.trigger?.setAttribute?.('aria-expanded', 'false');
   productDetailContext?.trigger?.classList?.remove?.('detail-open');
   productDetailContext = null;
@@ -425,6 +427,25 @@ async function fetchKisProductInsight(code) {
   const url = new URL(runtimeConfig.functionUrl);
   url.searchParams.set('mode', 'product');
   url.searchParams.set('code', code);
+  const response = await fetch(url, {
+    headers: { apikey: runtimeConfig.supabasePublishableKey, authorization: `Bearer ${authSession.access_token}` },
+    cache: 'no-store',
+  });
+  if (response.status === 401) {
+    void logoutPrivateSession();
+    throw new Error('로그인이 만료되었습니다. 다시 로그인하세요.');
+  }
+  return response;
+}
+
+async function fetchKisPerformance(codes) {
+  const uniqueCodes = [...new Set(codes.filter(code => /^[0-9A-Z]{6}$/.test(code)))].slice(0, 12);
+  if (!uniqueCodes.length) throw new Error('분석할 상장상품 코드가 없습니다.');
+  if (!hostedMode) return fetch(`/api/kis/performance?codes=${encodeURIComponent(uniqueCodes.join(','))}`, { cache: 'no-store' });
+  if (!await ensureHostedSession()) throw new Error('먼저 운영 계정에 로그인하세요.');
+  const url = new URL(runtimeConfig.functionUrl);
+  url.searchParams.set('mode', 'performance');
+  url.searchParams.set('codes', uniqueCodes.join(','));
   const response = await fetch(url, {
     headers: { apikey: runtimeConfig.supabasePublishableKey, authorization: `Bearer ${authSession.access_token}` },
     cache: 'no-store',
@@ -1243,6 +1264,13 @@ function catalogFeeValue(item) {
 
 function sortedCatalogItems(items) {
   const sort = $('#catalog-sort')?.value || 'default';
+  if (sort === 'return3') return [...items].sort((a, b) => {
+    const left = productInsightCache.get(a.code)?.periods?.threeMonths;
+    const right = productInsightCache.get(b.code)?.periods?.threeMonths;
+    const leftValue = Number.isFinite(left) ? left : Number.NEGATIVE_INFINITY;
+    const rightValue = Number.isFinite(right) ? right : Number.NEGATIVE_INFINITY;
+    return rightValue - leftValue || String(a.name).localeCompare(String(b.name), 'ko-KR');
+  });
   if (sort === 'name') return [...items].sort((a, b) => String(a.name).localeCompare(String(b.name), 'ko-KR'));
   if (sort === 'fee') return [...items].sort((a, b) => {
     const left = catalogFeeValue(a) ?? Number.POSITIVE_INFINITY;
@@ -1263,7 +1291,8 @@ function catalogCard(item, account, { publicList = false } = {}) {
   const fee = feeValue === null ? '보수 미표기' : `${feeValue.toFixed(2)}%`;
   const manager = item.manager || '운용사 미표기';
   const selected = catalogComparison.some(candidate => candidate.key === catalogCompareKey({ ...item, account }));
-  const periods = {
+  const cachedPeriods = productInsightCache.get(item.code)?.periods;
+  const periods = cachedPeriods || {
     oneMonth: item.oneMonth,
     threeMonths: item.threeMonth ?? item.threeMonths,
     sixMonths: item.sixMonth ?? item.sixMonths,
@@ -1273,10 +1302,66 @@ function catalogCard(item, account, { publicList = false } = {}) {
   const status = holding
     ? `<span class="status-tag good">보유 중 · ${weight(holding).toFixed(1)}%</span>`
     : `<span class="status-tag info">${publicList ? '회사 라인업 확인 필요' : '주문 가능 미확인'}</span>`;
+  const analyzed = catalogPerformance.account === account && catalogPerformance.codes.has(item.code);
+  const performance = analyzed ? `<div class="catalog-performance"><span>1개월 <b>${insightRate(periods.oneMonth)}</b></span><span>3개월 <b>${insightRate(periods.threeMonths)}</b></span><span>6개월 <b>${insightRate(periods.sixMonths)}</b></span></div>` : '';
   return `<article class="catalog-card catalog-card-row">
     <button class="catalog-card-main catalog-card-button" type="button" ${attributes}><div><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(detailKey.startsWith('fund:') ? '상품코드 미확인' : detailKey)} · ${escapeHtml(catalogProductType(item))} · ${escapeHtml(manager)}</span></div><div class="catalog-card-right">${status}<small>${escapeHtml(fee)} · 상세 보기</small></div></button>
+    ${performance}
     <button class="compare-toggle${selected ? ' selected' : ''}" type="button" ${compareAttributes} aria-pressed="${selected}">${selected ? '비교 해제' : '비교'}</button>
   </article>`;
+}
+
+function filteredKisCatalogItems() {
+  const items = window.KIS_CATALOG?.items || [];
+  const query = $('#catalog-query').value.trim().toLocaleLowerCase('ko-KR');
+  const kind = $('#catalog-kind').value;
+  return items.filter(item => (kind === 'all' || catalogProductType(item) === kind) && (!query || `${item.name} ${item.code} ${item.category} ${item.manager}`.toLocaleLowerCase('ko-KR').includes(query)));
+}
+
+function renderPerformanceSearch() {
+  const host = $('#performance-search');
+  const button = $('#catalog-performance-btn');
+  if (!host || !button) return;
+  const account = $('#catalog-account').value;
+  const unavailable = account !== 'k-invest';
+  button.disabled = catalogPerformance.loading || unavailable;
+  button.textContent = catalogPerformance.loading ? '수익률 조회 중…' : '현재 결과 분석';
+  host.classList.toggle('is-loading', catalogPerformance.loading);
+  const message = host.querySelector('p');
+  if (unavailable) message.textContent = '현재 자동 수익률 순위는 한국투자증권 IRP 공식 상장상품 목록에서 제공합니다.';
+  else if (catalogPerformance.error) message.textContent = catalogPerformance.error;
+  else if (catalogPerformance.codes.size) message.textContent = `${catalogPerformance.codes.size}개 후보를 분석했습니다. 3개월 수익률순이며 1·6개월 흐름도 함께 확인하세요.`;
+  else message.textContent = '상품명·테마로 후보를 12개 이하로 좁히면 3개월 수익률순으로 분석합니다. 1·3·6개월 수익률을 함께 확인하세요.';
+}
+
+async function analyzeCatalogPerformance() {
+  const matches = filteredKisCatalogItems();
+  if (!matches.length) { toast('분석할 검색 결과가 없습니다.'); return; }
+  if (matches.length > 12) {
+    catalogPerformance = { account: 'k-invest', codes: new Set(), loading: false, error: '검색 결과가 많습니다. 상품명이나 테마를 입력해 후보를 12개 이하로 좁혀주세요.', fetchedAt: '' };
+    renderPerformanceSearch();
+    toast('후보를 12개 이하로 좁혀주세요.');
+    return;
+  }
+  const codes = matches.map(item => item.code).filter(code => /^[0-9A-Z]{6}$/.test(code));
+  catalogPerformance = { account: 'k-invest', codes: new Set(codes), loading: true, error: '', fetchedAt: '' };
+  renderPerformanceSearch();
+  const generation = authGeneration;
+  try {
+    const response = await fetchKisPerformance(codes);
+    const result = await response.json();
+    if (generation !== authGeneration) return;
+    if (!response.ok || !Array.isArray(result.items)) throw new Error(result.error || '수익률을 조회하지 못했습니다.');
+    result.items.forEach(item => productInsightCache.set(item.code, item.error ? { error: item.error, periods: {} } : item));
+    catalogPerformance = { account: 'k-invest', codes: new Set(codes), loading: false, error: '', fetchedAt: result.fetchedAt || new Date().toISOString() };
+    $('#catalog-sort').value = 'return3';
+    renderCatalog();
+    toast(`${codes.length}개 후보를 3개월 수익률순으로 정렬했습니다.`);
+  } catch (error) {
+    if (generation !== authGeneration) return;
+    catalogPerformance = { account: 'k-invest', codes: new Set(codes), loading: false, error: `수익률 분석 실패: ${error.message}`, fetchedAt: '' };
+    renderPerformanceSearch();
+  }
 }
 
 function renderCatalogComparison() {
@@ -1346,6 +1431,7 @@ function renderCatalog() {
   const notice = $('#catalog-notice');
   const list = $('#catalog-list');
   const count = $('#catalog-count');
+  renderPerformanceSearch();
   if (account === 'woori-dc') {
     const verifiedItems = wooriCatalogue.items || [];
     const publicItems = wooriPublicTdf.items || [];
@@ -1368,9 +1454,7 @@ function renderCatalog() {
     return;
   }
   notice.innerHTML = `<strong>한국투자증권 IRP · 공식 ETF·리츠 목록</strong><p>기준일 ${escapeHtml(catalog.asOf)}. 이 목록은 상품 탐색용이며, 현재 계좌에서 실제 주문 가능한지는 미확인입니다. 주문 전 매수가능조회와 계좌별 위험자산 한도 확인이 필요합니다. 펀드·예금은 아직 이 목록에 포함되지 않았습니다. <a href="${escapeHtml(catalog.source)}" target="_blank" rel="noopener noreferrer">공식 공지 보기 ↗</a></p>`;
-  const query = $('#catalog-query').value.trim().toLocaleLowerCase('ko-KR');
-  const kind = $('#catalog-kind').value;
-  const matches = sortedCatalogItems(catalog.items.filter(item => (kind === 'all' || catalogProductType(item) === kind) && (!query || `${item.name} ${item.code} ${item.category} ${item.manager}`.toLocaleLowerCase('ko-KR').includes(query))));
+  const matches = sortedCatalogItems(filteredKisCatalogItems());
   count.textContent = `${matches.length.toLocaleString('ko-KR')}개 검색됨 · 전체 ${catalog.items.length.toLocaleString('ko-KR')}개`;
   list.innerHTML = matches.slice(0, 100).map(item => catalogCard(item, 'k-invest')).join('') || '<div class="empty-state">검색 결과가 없습니다.</div>';
   if (matches.length > 100) list.insertAdjacentHTML('beforeend', '<p class="catalog-more">처음 100개만 표시됩니다. 상품명이나 코드로 검색 범위를 좁혀주세요.</p>');
@@ -1645,6 +1729,8 @@ document.addEventListener('click', event => {
     $('#catalog-account').value = 'k-invest';
     $('#catalog-query').value = catalogCandidate.dataset.catalogCandidate;
     $('#catalog-kind').value = 'all';
+    catalogPerformance = { account: '', codes: new Set(), loading: false, error: '', fetchedAt: '' };
+    if ($('#catalog-sort').value === 'return3') $('#catalog-sort').value = 'default';
     switchView('products');
     renderCatalog();
     $('#catalog-query').focus();
@@ -1782,10 +1868,17 @@ $('#product-form').addEventListener('submit', async event => {
 });
 
 $('#refresh-btn').addEventListener('click', () => { render(); toast('저장된 입력 데이터를 다시 표시했습니다.'); });
-$('#catalog-account').addEventListener('change', renderCatalog);
-$('#catalog-query').addEventListener('input', renderCatalog);
-$('#catalog-kind').addEventListener('change', renderCatalog);
+function resetCatalogPerformanceSearch() {
+  catalogPerformance = { account: '', codes: new Set(), loading: false, error: '', fetchedAt: '' };
+  if ($('#catalog-sort').value === 'return3') $('#catalog-sort').value = 'default';
+  renderCatalog();
+}
+
+$('#catalog-account').addEventListener('change', resetCatalogPerformanceSearch);
+$('#catalog-query').addEventListener('input', resetCatalogPerformanceSearch);
+$('#catalog-kind').addEventListener('change', resetCatalogPerformanceSearch);
 $('#catalog-sort').addEventListener('change', renderCatalog);
+$('#catalog-performance-btn').addEventListener('click', analyzeCatalogPerformance);
 $('#kis-preview-btn').addEventListener('click', () => refreshKisHoldings());
 ['#sim-account', '#sim-limit-class', '#sim-value'].forEach(selector => $(selector)?.addEventListener('input', renderLimitSimulation));
 installLimitClassField();
