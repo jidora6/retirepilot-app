@@ -8,7 +8,7 @@ const hostedMode = Boolean(runtimeConfig.supabaseUrl && runtimeConfig.supabasePu
 const AUTH_STORAGE_KEY = 'retirepilot-auth-session';
 const VIEW_STORAGE_KEY = 'retirepilot-active-view';
 const HOLDINGS_EXPORT_VERSION = 1;
-const VIEW_TITLES = { overview: '전체 현황', accounts: '내 계좌', limits: '퇴직연금 한도 검사', products: '매수 상품 검색', recommendations: '운용 제안' };
+const VIEW_TITLES = { overview: '홈', accounts: '보유상품', limits: '퇴직연금 한도 검사', products: '상품 검색', recommendations: '운용 제안' };
 const EMPTY_PORTFOLIO = {
   accounts: [
     { id: 'k-invest', name: '한국투자증권 IRP' },
@@ -732,7 +732,7 @@ function recommendations() {
       text: `${covered.name}은 매입 이후 ${signed(covered.return)}, 계좌의 ${weight(covered).toFixed(1)}%입니다. 수익률뿐 아니라 커버드콜 전략의 집중 위험도 확인하세요. 전량 교체보다 일부 축소 방안을 먼저 검토하세요.`,
       meta: [['교체 1순위', '일부 축소'], ['제안 상품', 'RISE 적격 TDF 2040'], ['KIS 목록', '442560']],
       proposal: { from: covered.name, to: 'RISE TDF2040액티브 적격 (442560)', amount: `보유액의 절반 예시 ${won(Number(covered.value || 0) * 0.5)}`, amountValue: Math.round(Number(covered.value || 0) * 0.5), code: '442560', note: '부분 교체 가정이며 목표시점과 실제 매수 가능 여부를 먼저 확인하세요.' },
-      account: covered.account, actionLabel: '내 계좌 한도'
+      account: covered.account, actionLabel: '보유상품 한도'
     });
   }
   const gold = holdings.find(item => item.type === '금현물');
@@ -743,7 +743,7 @@ function recommendations() {
       text: `${gold.name}은 수익률 ${signed(gold.return)}이지만 계좌의 ${weight(gold).toFixed(1)}%입니다. 수익률이 플러스라는 이유만으로 유지하기보다, 금을 방어·분산 역할로 볼지부터 정하고 신규 매수는 멈춘 뒤 목표 비중을 정하는 편이 낫습니다.`,
       meta: [['현재 비중', weight(gold).toFixed(1) + '%'], ['권장 행동', '신규 매수 중단'], ['대안', '적격 TDF 또는 핵심지수']],
       proposal: { from: gold.name, to: 'RISE TDF2040액티브 적격 (442560)', amount: `보유액의 25% 예시 ${won(Number(gold.value || 0) * 0.25)}`, amountValue: Math.round(Number(gold.value || 0) * 0.25), code: '442560', note: '금은 일부를 남기고 비중만 낮추는 가정입니다.' },
-      account: gold.account, actionLabel: '내 계좌 한도'
+      account: gold.account, actionLabel: '보유상품 한도'
     });
   }
   const woori200 = holdings.find(isWoori200);
@@ -777,7 +777,7 @@ function recommendations() {
       title: `${accountName(holding.account)} · ${guidance.label}`,
       text: `${holding.name}은 매입 이후 ${signed(holding.return)}이며 ${label}가 감지됐습니다. 최근 5일 ${trendRate(trend.five?.return)}, 10일 ${trendRate(trend.ten?.return)}, 20일 ${trendRate(trend.twenty?.return)}입니다. ${guidance.detail}`,
       meta: [['판정', guidance.label], ['최근 고점 대비', trendRate(trend.twenty?.drawdown ?? trend.ten?.drawdown ?? trend.five?.drawdown)], ['기준일', trend.lastDate || '—']],
-      account: holding.account, actionLabel: '내 계좌 한도'
+      account: holding.account, actionLabel: '보유상품 한도'
     });
   }
   return result;
@@ -794,14 +794,10 @@ function renderTotals() {
   const share = total ? ki / total * 100 : 0;
   $('#total-value').textContent = won(total);
   $('#legend-total-value').textContent = won(total);
-  $('#donut-total').textContent = (total / 1000000).toFixed(1) + 'M';
   $('#ki-total').textContent = won(ki);
   $('#woori-total').textContent = won(woori);
   $('#ki-share').textContent = share.toFixed(1) + '%';
   $('#woori-share').textContent = (total ? 100 - share : 0).toFixed(1) + '%';
-  $('#account-donut').style.background = total
-    ? `conic-gradient(var(--navy) 0 ${share}%, var(--teal) ${share}% 100%)`
-    : 'var(--line)';
   $('#profit-count').textContent = visibleHoldings().filter(item => item.return > 0).length + '개';
   $('#loss-count').textContent = visibleHoldings().filter(item => item.return < 0).length + '개';
 }
@@ -831,7 +827,7 @@ function renderOverviewDetail() {
   }
   const labels = { all: '전체 보유 상품', profit: '수익 중인 상품', loss: '손실 중인 상품' };
   const filtered = holdings.filter(item => overviewDetail === 'all' || (overviewDetail === 'profit' ? item.return > 0 : item.return < 0));
-  host.innerHTML = `<div class="overview-detail-head"><h3>${labels[overviewDetail]}</h3><div><button class="text-btn" data-view-link="accounts">내 계좌에서 보기 →</button><button class="inline-close" type="button" data-close-overview-detail aria-label="상세 닫기">×</button></div></div>${filtered.map(item => `<div class="overview-detail-row"><div><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(accountName(item.account))} · ${escapeHtml(displayType(item))}</small></div><div><b class="${item.return >= 0 ? 'return-positive' : 'return-negative'}">${signed(item.return)}</b><small>${won(item.value)}</small></div></div>`).join('') || '<div class="empty-state">표시할 상품이 없습니다.</div>'}`;
+  host.innerHTML = `<div class="overview-detail-head"><h3>${labels[overviewDetail]}</h3><div><button class="text-btn" data-view-link="accounts">보유상품에서 보기 →</button><button class="inline-close" type="button" data-close-overview-detail aria-label="상세 닫기">×</button></div></div>${filtered.map(item => `<div class="overview-detail-row"><div><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(accountName(item.account))} · ${escapeHtml(displayType(item))}</small></div><div><b class="${item.return >= 0 ? 'return-positive' : 'return-negative'}">${signed(item.return)}</b><small>${won(item.value)}</small></div></div>`).join('') || '<div class="empty-state">표시할 상품이 없습니다.</div>'}`;
 }
 
 function renderHoldings() {
@@ -870,12 +866,12 @@ function renderRecommendations() {
   const card = item => `<article class="recommendation-card">
     <span class="rec-badge ${item.kind}">${item.icon}</span>
     <div class="rec-content"><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(item.text)}</p>${item.proposal ? `<button class="rec-proposal detail-trigger" type="button" data-product-detail="${escapeHtml(item.proposal.code || '442560')}" data-proposal-from="${escapeHtml(item.proposal.from)}" data-proposal-amount="${Number(item.proposal.amountValue || 0)}" data-proposal-account="${escapeHtml(item.account || '')}" aria-label="${escapeHtml(item.proposal.to)} 상세 정보 보기"><span>교체 제안 · 상세 정보 보기</span><strong>${escapeHtml(item.proposal.from)} <i>→</i> ${escapeHtml(item.proposal.to)}</strong><small>${escapeHtml(item.proposal.amount)} · ${escapeHtml(item.proposal.note)}</small></button>` : ''}<div class="rec-meta">${item.meta.map(([label, value]) => `<span>${escapeHtml(label)} <b>${escapeHtml(value)}</b></span>`).join('')}</div></div>
-    <div class="rec-action"><span class="status-tag info">검토용</span>${item.account ? `<button class="review-btn" data-account-open="${escapeHtml(item.account)}">${escapeHtml(item.actionLabel || '내 계좌')}</button>` : item.action ? `<button class="review-btn" data-view-link="${escapeHtml(item.action)}">${escapeHtml(item.actionLabel || '확인하기')}</button>` : ''}</div>
+    <div class="rec-action"><span class="status-tag info">검토용</span>${item.account ? `<button class="review-btn" data-account-open="${escapeHtml(item.account)}">${escapeHtml(item.actionLabel || '보유상품')}</button>` : item.action ? `<button class="review-btn" data-view-link="${escapeHtml(item.action)}">${escapeHtml(item.actionLabel || '확인하기')}</button>` : ''}</div>
   </article>`;
   const lossItems = items.filter(item => item.group === 'loss');
   const positiveItems = items.filter(item => item.group !== 'loss');
   $('#recommendation-list').innerHTML = `<section class="recommendation-group"><div class="recommendation-group-head"><h3>손실·하락 상품 교체 우선</h3><p>손실률만이 아니라 계좌 비중·종목 집중도·전략 복잡성을 함께 보고 교체 후보를 고릅니다.</p></div>${lossItems.map(card).join('') || '<div class="empty-state">현재 우선 교체 후보가 없습니다.</div>'}</section><section class="recommendation-group"><div class="recommendation-group-head"><h3>수익 보호·재배치 검토</h3><p>수익 중인 상품은 수익률만으로 팔지 않습니다. 추세 악화가 10·20거래일 확인되거나 비중이 과도할 때, 전량 매도 대신 일부 축소·대체를 검토합니다.</p></div>${positiveItems.map(card).join('') || '<div class="empty-state">현재 수익 보호 또는 재배치 검토 상품이 없습니다.</div>'}</section>`;
-  $('#signal-grid').innerHTML = items.slice(0, 3).map(item => `<article class="signal"><span class="signal-icon ${item.kind}">${item.icon}</span><div><h4>${escapeHtml(item.title)}</h4><p>${escapeHtml(item.text)}</p></div></article>`).join('');
+  $('#signal-grid').innerHTML = items.map(item => `<article class="signal"><span class="signal-icon ${item.kind}">${item.icon}</span><div><h4>${escapeHtml(item.title)}</h4><p>${escapeHtml(item.text)}</p></div></article>`).join('');
   $('#alert-count').textContent = items.length + '건';
   $('#nav-count').textContent = items.length;
   $('#rec-count').textContent = items.length;
@@ -934,14 +930,14 @@ function renderAccountLimitPanel() {
 }
 
 function installWooriImportPanel() {
-  const accountsView = $('#view-accounts');
-  if (!accountsView || $('#woori-import-panel')) return;
+  const toolsBody = $('#account-tools-body');
+  if (!toolsBody || $('#woori-import-panel')) return;
   const trend = $('#trend-panel');
   const panel = document.createElement('section');
   panel.id = 'woori-import-panel';
   panel.className = 'woori-import-panel';
   panel.innerHTML = '<div><strong>우리은행 DC · 반자동 가져오기</strong><p>우리은행의 자산잔고현황 표를 갱신하고, 종목코드·수량·평균매입가가 있는 ETF는 KIS 시세로 평가금액을 추정할 수 있습니다. 전체 상품 목록은 등록하지 않아도 됩니다.</p><small id="woori-import-status"></small></div><div class="sync-actions"><button class="outline-btn" type="button" data-woori-import="holdings">보유상품 표 가져오기</button><button class="outline-btn" type="button" data-woori-import="catalog">후보 상품만 확인</button><button class="outline-btn" type="button" data-refresh-woori-values>ETF 시세 추정 갱신</button></div>';
-  accountsView.insertBefore(panel, trend);
+  toolsBody.insertBefore(panel, trend);
 }
 
 function installHoldingTransferPanel() {

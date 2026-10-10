@@ -1,4 +1,4 @@
-const CACHE_NAME = 'retirepilot-shell-v6';
+const CACHE_NAME = 'retirepilot-shell-v7';
 const APP_SHELL = [
   './',
   './index.html',
