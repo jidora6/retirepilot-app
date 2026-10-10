@@ -43,6 +43,7 @@ let trendSnapshot = hostedMode ? null : loadTrendSnapshot();
 let overviewDetail = null;
 let productDetailContext = null;
 let productInsightCache = new Map();
+let catalogComparison = [];
 let wooriImportMode = null;
 let pendingHoldingImport = null;
 let migrationPromptDismissed = false;
@@ -170,6 +171,7 @@ async function logoutPrivateSession(options = {}) {
   wooriCatalogue = { items: [], importedAt: null };
   wooriPublicTdf = { items: [], fetchedAt: null };
   productInsightCache.clear();
+  catalogComparison = [];
   productDetailContext?.trigger?.setAttribute?.('aria-expanded', 'false');
   productDetailContext?.trigger?.classList?.remove?.('detail-open');
   productDetailContext = null;
@@ -1216,10 +1218,127 @@ function renderBuyCandidates() {
   const tdfFee = tdf?.fee === null || tdf?.fee === undefined ? '공식 목록 보수 확인' : `총보수 ${Number(tdf.fee).toFixed(2)}%`;
   const proposalTotal = recommendations().filter(item => item.account === 'k-invest').reduce((sum, item) => sum + Number(item.proposal?.amountValue || 0), 0);
   const holdRow = item => item ? `<article class="buy-hold-row"><div><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(accountName(item.account))} · 현재 비중 ${weight(item).toFixed(1)}%</small></div><span class="status-tag watch">추가매수 보류</span></article>` : '';
-  host.innerHTML = `<div class="buy-candidates-head"><div><h3>지금의 매수 후보</h3><p>단순 수익률 순위가 아니라 현재 보유 비중·중복·퇴직연금 한도를 먼저 반영합니다.</p></div><span class="status-tag good">개인화 1차</span></div>
+  host.innerHTML = `<div class="buy-candidates-head"><div><h3>우선 검토 후보</h3><p>현재 보유 비중·중복·퇴직연금 한도를 바탕으로 먼저 살펴볼 상품입니다. 자동 매수 추천이 아닙니다.</p></div><span class="status-tag good">검토용</span></div>
     <article class="buy-candidate-card"><div class="buy-candidate-main"><span class="buy-candidate-icon">◎</span><div><span class="buy-kicker">한국투자증권 IRP · 교체 / 신규 납입 후보</span><h4>${escapeHtml(tdfName)}</h4><p><b>${escapeHtml(tdf?.code || '442560')}</b> · 적격 TDF · ${escapeHtml(tdfFee)}</p><p class="buy-reason">현재 보유 비중과 투자 목표시점을 확인한 뒤 분산 후보로 검토하세요. 적격 TDF도 원금보장상품이 아니며 미래 수익을 보장하지 않습니다.</p></div></div><div class="buy-candidate-action"><span>부분 교체 예시</span><strong>${proposalTotal ? won(proposalTotal) : '비중 검토 후 산정'}</strong><small>현재 보유액 기준 가정 · 주문 아님</small><button class="review-btn" type="button" data-catalog-candidate="442560">공식 목록에서 보기</button></div></article>
     <div class="buy-candidate-note"><strong>지금은 추가매수보다 보류할 상품</strong><p>좋은 상품인지와 지금 더 사도 되는지는 다릅니다. 현재 비중이 높은 상품은 신규 매수 후보에서 제외합니다.</p><div class="buy-hold-list">${holdRow(sp500)}${holdRow(gold)}${domestic.length ? `<article class="buy-hold-row"><div><strong>우리은행 DC 국내주식 ETF</strong><small>${domestic.map(item => escapeHtml(item.name)).join(' · ')} · 합산 비중 ${domestic.reduce((sum, item) => sum + weight(item), 0).toFixed(1)}%</small></div><span class="status-tag watch">라인업 확인 전 보류</span></article>` : ''}</div></div>
     <div class="buy-candidate-foot">우리은행 DC는 공개 TDF 목록을 후보 탐색에 사용하고, 회사별 상품POOL 편입 여부는 실제 교체 직전에 확인합니다. 한국투자 IRP는 ${escapeHtml(window.KIS_CATALOG?.asOf || '공식 기준일')} 기준 공식 ETF·리츠 목록에서 후보 존재를 확인했으며, 실제 주문 화면의 매수가능 여부와 한도 분류가 최종입니다.</div>`;
+}
+
+function catalogProductType(item) {
+  return /TDF/i.test(`${item.name || ''} ${item.category || ''}`) ? 'TDF' : (item.kind || item.category || '기타');
+}
+
+function catalogHolding(item, account) {
+  return visibleHoldings().find(holding => holding.account === account && (
+    (item.code && holding.code === item.code)
+    || normalizedName(holding.name) === normalizedName(item.name)
+  ));
+}
+
+function catalogFeeValue(item) {
+  if (item.fee === null || item.fee === undefined || item.fee === '') return null;
+  const value = Number.parseFloat(String(item.fee).replace('%', ''));
+  return Number.isFinite(value) ? value : null;
+}
+
+function sortedCatalogItems(items) {
+  const sort = $('#catalog-sort')?.value || 'default';
+  if (sort === 'name') return [...items].sort((a, b) => String(a.name).localeCompare(String(b.name), 'ko-KR'));
+  if (sort === 'fee') return [...items].sort((a, b) => {
+    const left = catalogFeeValue(a) ?? Number.POSITIVE_INFINITY;
+    const right = catalogFeeValue(b) ?? Number.POSITIVE_INFINITY;
+    return left - right || String(a.name).localeCompare(String(b.name), 'ko-KR');
+  });
+  return items;
+}
+
+function catalogCompareKey(item) {
+  return `${item.account}:${item.code || `fund:${item.name}`}`;
+}
+
+function catalogCard(item, account, { publicList = false } = {}) {
+  const detailKey = item.code || `fund:${item.name}`;
+  const holding = catalogHolding(item, account);
+  const feeValue = catalogFeeValue(item);
+  const fee = feeValue === null ? '보수 미표기' : `${feeValue.toFixed(2)}%`;
+  const manager = item.manager || '운용사 미표기';
+  const selected = catalogComparison.some(candidate => candidate.key === catalogCompareKey({ ...item, account }));
+  const periods = {
+    oneMonth: item.oneMonth,
+    threeMonths: item.threeMonth ?? item.threeMonths,
+    sixMonths: item.sixMonth ?? item.sixMonths,
+  };
+  const attributes = `data-product-detail="${escapeHtml(detailKey)}" data-product-name="${escapeHtml(item.name)}" data-product-category="${escapeHtml(item.category || item.kind || '상품 분류 확인 필요')}" data-product-fee="${escapeHtml(fee)}" data-product-one-month="${escapeHtml(periods.oneMonth ?? '')}" data-product-three-months="${escapeHtml(periods.threeMonths ?? '')}" data-product-six-months="${escapeHtml(periods.sixMonths ?? '')}" data-proposal-account="${escapeHtml(account)}"`;
+  const compareAttributes = `data-compare-product="${escapeHtml(detailKey)}" data-product-name="${escapeHtml(item.name)}" data-product-category="${escapeHtml(item.category || item.kind || '')}" data-product-manager="${escapeHtml(manager)}" data-product-fee="${escapeHtml(fee)}" data-product-one-month="${escapeHtml(periods.oneMonth ?? '')}" data-product-three-months="${escapeHtml(periods.threeMonths ?? '')}" data-product-six-months="${escapeHtml(periods.sixMonths ?? '')}" data-proposal-account="${escapeHtml(account)}"`;
+  const status = holding
+    ? `<span class="status-tag good">보유 중 · ${weight(holding).toFixed(1)}%</span>`
+    : `<span class="status-tag info">${publicList ? '회사 라인업 확인 필요' : '주문 가능 미확인'}</span>`;
+  return `<article class="catalog-card catalog-card-row">
+    <button class="catalog-card-main catalog-card-button" type="button" ${attributes}><div><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(detailKey.startsWith('fund:') ? '상품코드 미확인' : detailKey)} · ${escapeHtml(catalogProductType(item))} · ${escapeHtml(manager)}</span></div><div class="catalog-card-right">${status}<small>${escapeHtml(fee)} · 상세 보기</small></div></button>
+    <button class="compare-toggle${selected ? ' selected' : ''}" type="button" ${compareAttributes} aria-pressed="${selected}">${selected ? '비교 해제' : '비교'}</button>
+  </article>`;
+}
+
+function renderCatalogComparison() {
+  const host = $('#catalog-compare');
+  if (!host) return;
+  if (!catalogComparison.length) {
+    host.hidden = true;
+    host.innerHTML = '';
+    return;
+  }
+  host.hidden = false;
+  const cards = catalogComparison.map(item => {
+    const insight = productInsightCache.get(item.code);
+    const periods = insight?.periods || item.periods || {};
+    const value = key => insight === undefined && /^[0-9A-Z]{6}$/.test(item.code) ? '조회 중' : insightRate(periods[key]);
+    return `<article><button type="button" class="compare-remove" data-remove-comparison="${escapeHtml(item.key)}" aria-label="${escapeHtml(item.name)} 비교에서 제거">×</button><small>${escapeHtml(item.manager)}</small><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.fee)}</span><dl><div><dt>1개월</dt><dd>${value('oneMonth')}</dd></div><div><dt>3개월</dt><dd>${value('threeMonths')}</dd></div><div><dt>6개월</dt><dd>${value('sixMonths')}</dd></div></dl></article>`;
+  }).join('');
+  host.innerHTML = `<div class="catalog-compare-head"><div><strong>상품 비교</strong><p>최대 3개 상품의 기간 수익률과 총보수를 비교합니다.</p></div><button class="text-btn" type="button" data-clear-comparison>전체 해제</button></div><div class="catalog-compare-grid">${cards}</div>`;
+}
+
+async function loadComparisonInsight(item) {
+  if (!/^[0-9A-Z]{6}$/.test(item.code) || productInsightCache.has(item.code)) return;
+  const generation = authGeneration;
+  try {
+    const response = await fetchKisProductInsight(item.code);
+    const result = await response.json();
+    if (generation !== authGeneration) return;
+    if (!response.ok || !result.periods) throw new Error(result.error || '가격 정보 조회 실패');
+    productInsightCache.set(item.code, result);
+  } catch (error) {
+    productInsightCache.set(item.code, { error: error.message, periods: {} });
+  }
+  renderCatalogComparison();
+}
+
+function toggleCatalogComparison(element) {
+  const account = element.dataset.proposalAccount || 'k-invest';
+  const code = element.dataset.compareProduct;
+  const key = `${account}:${code}`;
+  const existing = catalogComparison.findIndex(item => item.key === key);
+  if (existing >= 0) catalogComparison.splice(existing, 1);
+  else {
+    if (catalogComparison.length >= 3) {
+      toast('상품 비교는 최대 3개까지 선택할 수 있습니다.');
+      return;
+    }
+    const period = name => {
+      const raw = element.dataset[name];
+      if (raw === undefined || raw === '') return undefined;
+      const value = Number(raw);
+      return Number.isFinite(value) ? value : undefined;
+    };
+    const item = {
+      key, account, code, name: element.dataset.productName || code,
+      manager: element.dataset.productManager || '운용사 미표기', fee: element.dataset.productFee || '보수 미표기',
+      periods: { oneMonth: period('productOneMonth'), threeMonths: period('productThreeMonths'), sixMonths: period('productSixMonths') },
+    };
+    catalogComparison.push(item);
+    loadComparisonInsight(item);
+  }
+  renderCatalog();
+  renderCatalogComparison();
 }
 
 function renderCatalog() {
@@ -1234,13 +1353,10 @@ function renderCatalog() {
     const items = verifiedItems.length ? verifiedItems : publicItems;
     notice.innerHTML = verifiedItems.length ? `<strong>우리은행 DC · 확인한 후보</strong><p>${escapeHtml(new Date(wooriCatalogue.importedAt).toLocaleString('ko-KR'))}에 확인한 ${verifiedItems.length}개입니다. 실제 주문 가능 여부와 한도 분류는 우리은행 상품 변경 화면에서 최종 확인하세요.</p>` : isPublicList ? `<strong>우리은행 공개 TDF 후보 · ${publicItems.length}개</strong><p>${escapeHtml(new Date(wooriPublicTdf.fetchedAt).toLocaleString('ko-KR'))} 기준 공개 목록입니다. 사용자님의 회사 DC 상품POOL 편입 여부는 아직 확인되지 않았습니다.</p>` : '<strong>우리은행 공개 TDF 후보</strong><p>공개 TDF 목록을 자동 수집해 후보 탐색에 사용합니다. 회사별 DC 라인업 편입 여부는 실제 교체 직전에 상품명 하나만 검색해 확인하면 됩니다.</p><button class="outline-btn" type="button" data-load-woori-tdf>공개 TDF 목록 불러오기</button>';
     const query = $('#catalog-query').value.trim().toLocaleLowerCase('ko-KR');
-    const matches = items.filter(item => !query || `${item.name} ${item.code} ${item.category || ''} ${item.manager || ''}`.toLocaleLowerCase('ko-KR').includes(query));
+    const kind = $('#catalog-kind').value;
+    const matches = sortedCatalogItems(items.filter(item => (kind === 'all' || catalogProductType(item) === kind) && (!query || `${item.name} ${item.code} ${item.category || ''} ${item.manager || ''}`.toLocaleLowerCase('ko-KR').includes(query))));
     count.textContent = isPublicList ? `${matches.length}개 검색됨 · 공개 TDF` : `확인한 후보 ${matches.length}개`;
-    list.innerHTML = matches.slice(0, 100).map(item => {
-      const detailKey = item.code || `fund:${item.name}`;
-      const attributes = `data-product-detail="${escapeHtml(detailKey)}" data-product-name="${escapeHtml(item.name)}" data-product-category="${escapeHtml(item.category || '우리은행 DC 확인 후보')}" data-product-fee="${escapeHtml(item.fee || '')}" data-product-one-month="${escapeHtml(item.oneMonth ?? '')}" data-product-three-months="${escapeHtml(item.threeMonth ?? item.threeMonths ?? '')}" data-product-six-months="${escapeHtml(item.sixMonth ?? item.sixMonths ?? '')}" data-proposal-account="woori-dc"`;
-      return `<button class="catalog-card catalog-card-button" type="button" ${attributes}><div><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.code || '상품코드 미확인')} · ${escapeHtml(item.category || '우리은행 DC 확인 후보')}</span></div><div class="catalog-card-right"><span class="status-tag ${isPublicList ? 'info' : 'good'}">${isPublicList ? '회사 라인업 확인 필요' : '후보 검토 가능'}</span><small>${isPublicList ? `1년 ${escapeHtml(item.oneYear || '—')}% · 총보수 ${escapeHtml(item.fee || '—')}%` : '상세 정보 보기'}</small></div></button>`;
-    }).join('') || '<div class="empty-state">등록된 상품이 없거나 검색 결과가 없습니다.</div>';
+    list.innerHTML = matches.slice(0, 100).map(item => catalogCard(item, 'woori-dc', { publicList: isPublicList })).join('') || '<div class="empty-state">등록된 상품이 없거나 검색 결과가 없습니다.</div>';
     if (matches.length > 100) list.insertAdjacentHTML('beforeend', '<p class="catalog-more">처음 100개만 표시됩니다. 목표연도나 상품명으로 검색 범위를 좁혀주세요.</p>');
     return;
   }
@@ -1254,9 +1370,9 @@ function renderCatalog() {
   notice.innerHTML = `<strong>한국투자증권 IRP · 공식 ETF·리츠 목록</strong><p>기준일 ${escapeHtml(catalog.asOf)}. 이 목록은 상품 탐색용이며, 현재 계좌에서 실제 주문 가능한지는 미확인입니다. 주문 전 매수가능조회와 계좌별 위험자산 한도 확인이 필요합니다. 펀드·예금은 아직 이 목록에 포함되지 않았습니다. <a href="${escapeHtml(catalog.source)}" target="_blank" rel="noopener noreferrer">공식 공지 보기 ↗</a></p>`;
   const query = $('#catalog-query').value.trim().toLocaleLowerCase('ko-KR');
   const kind = $('#catalog-kind').value;
-  const matches = catalog.items.filter(item => (kind === 'all' || item.kind === kind) && (!query || `${item.name} ${item.code} ${item.category} ${item.manager}`.toLocaleLowerCase('ko-KR').includes(query)));
+  const matches = sortedCatalogItems(catalog.items.filter(item => (kind === 'all' || catalogProductType(item) === kind) && (!query || `${item.name} ${item.code} ${item.category} ${item.manager}`.toLocaleLowerCase('ko-KR').includes(query))));
   count.textContent = `${matches.length.toLocaleString('ko-KR')}개 검색됨 · 전체 ${catalog.items.length.toLocaleString('ko-KR')}개`;
-  list.innerHTML = matches.slice(0, 100).map(item => `<button class="catalog-card catalog-card-button" type="button" data-product-detail="${escapeHtml(item.code)}" data-product-name="${escapeHtml(item.name)}" data-product-category="${escapeHtml(item.category || item.kind || '상품 분류 확인 필요')}" data-product-fee="${escapeHtml(item.fee === null ? '' : Number(item.fee).toFixed(2) + '%')}" data-proposal-account="k-invest"><div><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.code)} · ${escapeHtml(item.kind)}${item.category ? ' · ' + escapeHtml(item.category) : ''}</span></div><div class="catalog-card-right"><span class="status-tag info">주문 가능 미확인</span><small>${item.fee === null ? '보수 미표기' : '총보수 ' + Number(item.fee).toFixed(2) + '%'} · 상세 보기</small></div></button>`).join('') || '<div class="empty-state">검색 결과가 없습니다.</div>';
+  list.innerHTML = matches.slice(0, 100).map(item => catalogCard(item, 'k-invest')).join('') || '<div class="empty-state">검색 결과가 없습니다.</div>';
   if (matches.length > 100) list.insertAdjacentHTML('beforeend', '<p class="catalog-more">처음 100개만 표시됩니다. 상품명이나 코드로 검색 범위를 좁혀주세요.</p>');
 }
 
@@ -1405,7 +1521,8 @@ function renderProductDetailPanel() {
     panel.className = 'product-detail-inline';
   }
   const context = productDetailContext;
-  context.trigger.insertAdjacentElement('afterend', panel);
+  const anchor = context.trigger.closest('.catalog-card') || context.trigger;
+  anchor.insertAdjacentElement('afterend', panel);
   context.trigger.classList.add('detail-open');
   context.trigger.setAttribute('aria-expanded', 'true');
   const profile = productProfile(context);
@@ -1532,6 +1649,24 @@ document.addEventListener('click', event => {
     renderCatalog();
     $('#catalog-query').focus();
   }
+  const compare = event.target.closest('[data-compare-product]');
+  if (compare) {
+    toggleCatalogComparison(compare);
+    return;
+  }
+  const removeComparison = event.target.closest('[data-remove-comparison]');
+  if (removeComparison) {
+    catalogComparison = catalogComparison.filter(item => item.key !== removeComparison.dataset.removeComparison);
+    renderCatalog();
+    renderCatalogComparison();
+    return;
+  }
+  if (event.target.closest('[data-clear-comparison]')) {
+    catalogComparison = [];
+    renderCatalog();
+    renderCatalogComparison();
+    return;
+  }
   const detail = event.target.closest('[data-product-detail]');
   if (detail) {
     const periodValue = name => {
@@ -1650,6 +1785,7 @@ $('#refresh-btn').addEventListener('click', () => { render(); toast('저장된 �
 $('#catalog-account').addEventListener('change', renderCatalog);
 $('#catalog-query').addEventListener('input', renderCatalog);
 $('#catalog-kind').addEventListener('change', renderCatalog);
+$('#catalog-sort').addEventListener('change', renderCatalog);
 $('#kis-preview-btn').addEventListener('click', () => refreshKisHoldings());
 ['#sim-account', '#sim-limit-class', '#sim-value'].forEach(selector => $(selector)?.addEventListener('input', renderLimitSimulation));
 installLimitClassField();
