@@ -816,7 +816,12 @@ function renderOverviewDetail() {
     return;
   }
   const trigger = [...document.querySelectorAll('[data-overview-detail]')].find(element => element.dataset.overviewDetail === overviewDetail);
-  trigger?.insertAdjacentElement('afterend', host);
+  const grid = $('.metric-grid');
+  const cards = grid ? [...grid.children].filter(element => element.matches('[data-overview-detail]')) : [];
+  const triggerIndex = cards.indexOf(trigger);
+  const columnCount = grid ? Math.max(1, getComputedStyle(grid).gridTemplateColumns.split(/\s+/).filter(Boolean).length) : 1;
+  const rowEndIndex = Math.min(cards.length - 1, Math.floor(triggerIndex / columnCount) * columnCount + columnCount - 1);
+  (cards[rowEndIndex] || trigger)?.insertAdjacentElement('afterend', host);
   host.hidden = false;
   const holdings = visibleHoldings();
   if (overviewDetail === 'recommendations') {
