@@ -38,6 +38,7 @@ let filter = 'all';
 let editingId = null;
 let authSession = null;
 let authGeneration = 0;
+let guestMode = false;
 let kisSnapshot = hostedMode ? null : loadKisSnapshot();
 let trendSnapshot = hostedMode ? null : loadTrendSnapshot();
 let overviewDetail = null;
@@ -49,6 +50,7 @@ let wooriImportMode = null;
 let pendingHoldingImport = null;
 let migrationPromptDismissed = false;
 const $ = selector => document.querySelector(selector);
+const isPublicGuest = () => hostedMode && guestMode && !authSession?.access_token;
 const escapeHtml = value => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 const won = value => '₩ ' + Math.round(value).toLocaleString('ko-KR');
 const signed = value => (value > 0 ? '+' : '') + Number(value).toFixed(2) + '%';
@@ -130,6 +132,7 @@ function loadAuthSession() {
 
 function saveAuthSession(session) {
   authSession = session;
+  if (session) guestMode = false;
   try {
     if (session) sessionStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(session));
     else sessionStorage.removeItem(AUTH_STORAGE_KEY);
@@ -164,6 +167,7 @@ async function logoutPrivateSession(options = {}) {
   }
   authGeneration += 1;
   authSession = null;
+  guestMode = false;
   removeRetirePilotStorage(localStorage);
   removeRetirePilotStorage(sessionStorage);
   data = structuredClone(EMPTY_PORTFOLIO);
@@ -208,8 +212,15 @@ function updateAuthPanel() {
     panel = document.createElement('div');
     panel.id = 'auth-panel';
     panel.className = 'auth-gate';
-    panel.innerHTML = '<div class="auth-gate-card"><div class="auth-brand"><span class="brand-mark">R</span><div><strong>RetirePilot</strong><small>PRIVATE WORKSPACE</small></div></div><h1>퇴직연금 계정 로그인</h1><p id="auth-status">Supabase 계정으로 로그인하세요.</p><form id="auth-form" autocomplete="off"><label>이메일<input name="email" type="email" required autocomplete="username"></label><label>비밀번호<input name="password" type="password" required autocomplete="current-password"></label><button class="primary-btn" id="auth-submit" type="submit">로그인</button></form><small class="auth-note">계좌·보유상품·운용 제안은 로그인 후에만 표시됩니다.</small></div>';
+    panel.innerHTML = '<div class="auth-gate-card"><div class="auth-brand"><span class="brand-mark">R</span><div><strong>RetirePilot</strong><small>PRIVATE WORKSPACE</small></div></div><h1>퇴직연금 계정 로그인</h1><p id="auth-status">Supabase 계정으로 로그인하세요.</p><form id="auth-form" autocomplete="off"><label>이메일<input name="email" type="email" required autocomplete="username"></label><label>비밀번호<input name="password" type="password" required autocomplete="current-password"></label><button class="primary-btn" id="auth-submit" type="submit">로그인</button></form><button class="outline-btn guest-browse-btn" id="guest-browse-btn" type="button">로그인 없이 상품 검색</button><small class="auth-note">공개 상품 검색은 로그인 없이 이용할 수 있습니다. 계좌·보유상품·수익률 분석·운용 제안은 로그인 후에만 표시됩니다.</small></div>';
     document.body.append(panel);
+    panel.querySelector('#guest-browse-btn').addEventListener('click', () => {
+      guestMode = true;
+      data = structuredClone(EMPTY_PORTFOLIO);
+      switchView('products', { persist: false });
+      updateAuthPanel();
+      renderCatalog();
+    });
     panel.querySelector('#auth-form').addEventListener('submit', async event => {
       event.preventDefault();
       const form = event.currentTarget;
@@ -239,10 +250,16 @@ function updateAuthPanel() {
   const status = $('#auth-status');
   const logout = $('#auth-session-btn');
   const signedIn = Boolean(authSession?.access_token);
-  panel.hidden = signedIn;
-  document.body.classList.toggle('auth-locked', !signedIn);
+  const browsingPublicly = guestMode && !signedIn;
+  panel.hidden = signedIn || browsingPublicly;
+  document.body.classList.toggle('auth-locked', !signedIn && !browsingPublicly);
+  document.body.classList.toggle('guest-mode', browsingPublicly);
   if (form) form.hidden = signedIn;
-  if (logout) logout.hidden = !signedIn;
+  if (logout) {
+    logout.hidden = !signedIn && !browsingPublicly;
+    logout.textContent = browsingPublicly ? '로그인' : '로그아웃';
+  }
+  if ($('.eyebrow')) $('.eyebrow').textContent = browsingPublicly ? 'PUBLIC CATALOG' : 'MY RETIREMENT';
   status.textContent = signedIn ? '운영 계정으로 로그인됨 · KIS 키는 서버에만 있습니다.' : '본인 Supabase 계정으로 로그인하세요.';
 }
 
@@ -1323,18 +1340,21 @@ function renderPerformanceSearch() {
   const button = $('#catalog-performance-btn');
   if (!host || !button) return;
   const account = $('#catalog-account').value;
-  const unavailable = account !== 'k-invest';
+  const guest = isPublicGuest();
+  const unavailable = account !== 'k-invest' || guest;
   button.disabled = catalogPerformance.loading || unavailable;
-  button.textContent = catalogPerformance.loading ? '수익률 조회 중…' : '현재 결과 분석';
+  button.textContent = guest ? '로그인 후 분석' : catalogPerformance.loading ? '수익률 조회 중…' : '현재 결과 분석';
   host.classList.toggle('is-loading', catalogPerformance.loading);
   const message = host.querySelector('p');
-  if (unavailable) message.textContent = '현재 자동 수익률 순위는 한국투자증권 IRP 공식 상장상품 목록에서 제공합니다.';
+  if (guest) message.textContent = '1·3·6개월 수익률 분석과 상품 비교는 로그인 후 이용할 수 있습니다.';
+  else if (unavailable) message.textContent = '현재 자동 수익률 순위는 한국투자증권 IRP 공식 상장상품 목록에서 제공합니다.';
   else if (catalogPerformance.error) message.textContent = catalogPerformance.error;
   else if (catalogPerformance.codes.size) message.textContent = `${catalogPerformance.codes.size}개 후보를 분석했습니다. 3개월 수익률순이며 1·6개월 흐름도 함께 확인하세요.`;
   else message.textContent = '상품명·테마로 후보를 12개 이하로 좁히면 3개월 수익률순으로 분석합니다. 1·3·6개월 수익률을 함께 확인하세요.';
 }
 
 async function analyzeCatalogPerformance() {
+  if (isPublicGuest()) { toast('수익률 분석은 로그인 후 이용할 수 있습니다.'); return; }
   const matches = filteredKisCatalogItems();
   if (!matches.length) { toast('분석할 검색 결과가 없습니다.'); return; }
   if (matches.length > 12) {
@@ -1398,6 +1418,7 @@ async function loadComparisonInsight(item) {
 }
 
 function toggleCatalogComparison(element) {
+  if (isPublicGuest()) { toast('상품 비교는 로그인 후 이용할 수 있습니다.'); return; }
   const account = element.dataset.proposalAccount || 'k-invest';
   const code = element.dataset.compareProduct;
   const key = `${account}:${code}`;
@@ -1427,7 +1448,12 @@ function toggleCatalogComparison(element) {
 }
 
 function renderCatalog() {
+  if (isPublicGuest()) $('#catalog-account').value = 'k-invest';
   const account = $('#catalog-account').value;
+  $('#catalog-account').disabled = isPublicGuest();
+  const returnSort = $('#catalog-sort').querySelector('option[value="return3"]');
+  if (returnSort) returnSort.disabled = isPublicGuest();
+  if (isPublicGuest() && $('#catalog-sort').value === 'return3') $('#catalog-sort').value = 'default';
   const notice = $('#catalog-notice');
   const list = $('#catalog-list');
   const count = $('#catalog-count');
@@ -1453,7 +1479,7 @@ function renderCatalog() {
     list.innerHTML = '';
     return;
   }
-  notice.innerHTML = `<strong>한국투자증권 IRP · 공식 ETF·리츠 목록</strong><p>기준일 ${escapeHtml(catalog.asOf)}. 이 목록은 상품 탐색용이며, 현재 계좌에서 실제 주문 가능한지는 미확인입니다. 주문 전 매수가능조회와 계좌별 위험자산 한도 확인이 필요합니다. 펀드·예금은 아직 이 목록에 포함되지 않았습니다. <a href="${escapeHtml(catalog.source)}" target="_blank" rel="noopener noreferrer">공식 공지 보기 ↗</a></p>`;
+  notice.innerHTML = `<strong>한국투자증권 IRP · 공식 ETF·리츠 목록${isPublicGuest() ? ' · 공개 검색' : ''}</strong><p>기준일 ${escapeHtml(catalog.asOf)}. 이 목록은 상품 탐색용이며, 현재 계좌에서 실제 주문 가능한지는 미확인입니다. 주문 전 매수가능조회와 계좌별 위험자산 한도 확인이 필요합니다. 펀드·예금은 아직 이 목록에 포함되지 않았습니다.${isPublicGuest() ? ' 보유 여부·수익률 분석·맞춤 제안은 로그인 후 확인할 수 있습니다.' : ''} <a href="${escapeHtml(catalog.source)}" target="_blank" rel="noopener noreferrer">공식 공지 보기 ↗</a></p>`;
   const matches = sortedCatalogItems(filteredKisCatalogItems());
   count.textContent = `${matches.length.toLocaleString('ko-KR')}개 검색됨 · 전체 ${catalog.items.length.toLocaleString('ko-KR')}개`;
   list.innerHTML = matches.slice(0, 100).map(item => catalogCard(item, 'k-invest')).join('') || '<div class="empty-state">검색 결과가 없습니다.</div>';
@@ -1542,6 +1568,7 @@ async function refreshKisTrends({ quiet = false } = {}) {
 }
 
 function switchView(view, { persist = true } = {}) {
+  if (isPublicGuest()) view = 'products';
   if (!VIEW_TITLES[view]) view = 'overview';
   document.querySelectorAll('.view').forEach(element => element.classList.toggle('active', element.id === 'view-' + view));
   document.querySelectorAll('.nav-item[data-view]').forEach(element => element.classList.toggle('active', element.dataset.view === view));
@@ -1616,8 +1643,9 @@ function renderProductDetailPanel() {
   const beforeWeight = accountValue ? amount / accountValue * 100 : 0;
   const fromHolding = visibleHoldings().find(item => normalizedName(item.name) === normalizedName(context.from));
   const insight = productInsightCache.get(context.code);
-  const loading = insight === undefined;
-  const failed = insight?.error;
+  const guest = isPublicGuest();
+  const loading = !guest && insight === undefined;
+  const failed = guest ? '가격 차트와 기간 수익률은 로그인 후 확인할 수 있습니다.' : insight?.error;
   const metrics = insight?.periods || context.periods || {};
   const currentTarget = visibleHoldings().find(item => item.code === context.code);
   const currentTargetValue = currentTarget?.value || 0;
@@ -1631,7 +1659,7 @@ function renderProductDetailPanel() {
     <h2 id="product-detail-title">${escapeHtml(profile.name)}</h2>
     <p class="detail-subtitle">${escapeHtml(profile.code)} · ${escapeHtml(profile.category)}${sourceLink}</p>
     <section class="detail-section"><div class="detail-section-head"><span>1</span><div><h3>가격 추세</h3><p>최근 30거래일 일봉입니다. 상장상품이 아닌 펀드는 일봉 차트가 제공되지 않을 수 있습니다.</p></div></div>${loading ? '<div class="detail-loading">가격 조회 중…</div>' : failed ? `<div class="detail-chart-empty">${escapeHtml(insight.error)}</div>` : insight?.candles?.length ? candleChart(insight.candles) : '<div class="detail-chart-empty">이 상품은 조회 가능한 시장 가격 차트가 없습니다.</div>'}</section>
-    <section class="detail-section"><div class="detail-section-head"><span>2</span><div><h3>기간 수익률·변동 확인</h3><p>단기 수익률만 보고 교체하지 않고, 1·3·6개월 흐름을 비교합니다.</p></div></div><div class="detail-stats"><div><small>1개월</small><b>${loading ? '조회 중' : insightRate(metrics.oneMonth)}</b></div><div><small>3개월</small><b>${loading ? '조회 중' : insightRate(metrics.threeMonths)}</b></div><div><small>6개월</small><b>${loading ? '조회 중' : insightRate(metrics.sixMonths)}</b></div></div></section>
+    <section class="detail-section"><div class="detail-section-head"><span>2</span><div><h3>기간 수익률·변동 확인</h3><p>단기 수익률만 보고 교체하지 않고, 1·3·6개월 흐름을 비교합니다.</p></div></div><div class="detail-stats"><div><small>1개월</small><b>${guest ? '로그인 후' : loading ? '조회 중' : insightRate(metrics.oneMonth)}</b></div><div><small>3개월</small><b>${guest ? '로그인 후' : loading ? '조회 중' : insightRate(metrics.threeMonths)}</b></div><div><small>6개월</small><b>${guest ? '로그인 후' : loading ? '조회 중' : insightRate(metrics.sixMonths)}</b></div></div></section>
     <section class="detail-section"><div class="detail-section-head"><span>3</span><div><h3>무엇을 사는지</h3><p>${escapeHtml(profile.strategy)}</p></div></div><div class="detail-facts"><div><small>총보수</small><b>${escapeHtml(profile.fee)}</b></div><div><small>한도 분류</small><b>${escapeHtml(tdfLimit)}</b></div><div><small>핵심 위험</small><b>${escapeHtml(profile.risk)}</b></div></div></section>
     ${proposalSection}
     <p class="detail-disclaimer">가격·수익률은 조회 시점 정보이며 미래 수익을 보장하지 않습니다. 실제 매수 가능 여부와 적격 TDF 분류는 한국투자증권 주문 화면에서 최종 확인하세요.</p>
@@ -1647,6 +1675,7 @@ async function openProductDetail(context) {
   const generation = authGeneration;
   productDetailContext = context;
   renderProductDetailPanel();
+  if (isPublicGuest()) return;
   if (productInsightCache.has(context.code)) return;
   if (context.periods && !/^[0-9A-Z]{6}$/.test(context.code || '')) {
     productInsightCache.set(context.code || context.name, { candles: [], periods: context.periods });
@@ -1889,7 +1918,14 @@ loadAuthSession();
 updateAuthPanel();
 render();
 switchView(loadSavedView());
-$('#auth-session-btn')?.addEventListener('click', () => { void logoutPrivateSession(); });
+$('#auth-session-btn')?.addEventListener('click', () => {
+  if (isPublicGuest()) {
+    guestMode = false;
+    updateAuthPanel();
+    return;
+  }
+  void logoutPrivateSession();
+});
 checkKisConnection().then(async ready => {
   if (hostedMode && ready) {
     try {
