@@ -131,8 +131,16 @@ function loadAuthSession() {
 }
 
 function saveAuthSession(session) {
+  const wasGuest = guestMode;
   authSession = session;
-  if (session) guestMode = false;
+  if (session) {
+    guestMode = false;
+    if (wasGuest) {
+      productInsightCache.clear();
+      catalogComparison = [];
+      catalogPerformance = { account: '', codes: new Set(), loading: false, error: '', fetchedAt: '' };
+    }
+  }
   try {
     if (session) sessionStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(session));
     else sessionStorage.removeItem(AUTH_STORAGE_KEY);
@@ -472,6 +480,16 @@ async function fetchKisPerformance(codes) {
     throw new Error('로그인이 만료되었습니다. 다시 로그인하세요.');
   }
   return response;
+}
+
+async function fetchPublicPerformance(codes) {
+  const uniqueCodes = [...new Set(codes.filter(code => /^[0-9A-Z]{6}$/.test(code)))].slice(0, 12);
+  if (!uniqueCodes.length) throw new Error('분석할 상장상품 코드가 없습니다.');
+  if (!hostedMode) return fetch(`/api/kis/public-performance?codes=${encodeURIComponent(uniqueCodes.join(','))}`, { cache: 'no-store' });
+  const url = new URL(runtimeConfig.functionUrl);
+  url.searchParams.set('mode', 'public-performance');
+  url.searchParams.set('codes', uniqueCodes.join(','));
+  return fetch(url, { headers: { apikey: runtimeConfig.supabasePublishableKey }, cache: 'no-store' });
 }
 
 async function fetchWooriEtfQuotes(codes) {
@@ -1341,20 +1359,18 @@ function renderPerformanceSearch() {
   if (!host || !button) return;
   const account = $('#catalog-account').value;
   const guest = isPublicGuest();
-  const unavailable = account !== 'k-invest' || guest;
+  const unavailable = account !== 'k-invest';
   button.disabled = catalogPerformance.loading || unavailable;
-  button.textContent = guest ? '로그인 후 분석' : catalogPerformance.loading ? '수익률 조회 중…' : '현재 결과 분석';
+  button.textContent = catalogPerformance.loading ? '수익률 조회 중…' : guest ? '공개 분석 보기' : '현재 결과 분석';
   host.classList.toggle('is-loading', catalogPerformance.loading);
   const message = host.querySelector('p');
-  if (guest) message.textContent = '1·3·6개월 수익률 분석과 상품 비교는 로그인 후 이용할 수 있습니다.';
-  else if (unavailable) message.textContent = '현재 자동 수익률 순위는 한국투자증권 IRP 공식 상장상품 목록에서 제공합니다.';
+  if (unavailable) message.textContent = '현재 자동 수익률 순위는 한국투자증권 IRP 공식 상장상품 목록에서 제공합니다.';
   else if (catalogPerformance.error) message.textContent = catalogPerformance.error;
   else if (catalogPerformance.codes.size) message.textContent = `${catalogPerformance.codes.size}개 후보를 분석했습니다. 3개월 수익률순이며 1·6개월 흐름도 함께 확인하세요.`;
-  else message.textContent = '상품명·테마로 후보를 12개 이하로 좁히면 3개월 수익률순으로 분석합니다. 1·3·6개월 수익률을 함께 확인하세요.';
+  else message.textContent = `${guest ? '로그인 사용자가 갱신한 공개 캐시를 사용합니다. ' : ''}한 번에 최대 12개까지 분석할 수 있습니다. 상품명·테마로 검색 결과를 12개 이하로 좁혀주세요.`;
 }
 
 async function analyzeCatalogPerformance() {
-  if (isPublicGuest()) { toast('수익률 분석은 로그인 후 이용할 수 있습니다.'); return; }
   const matches = filteredKisCatalogItems();
   if (!matches.length) { toast('분석할 검색 결과가 없습니다.'); return; }
   if (matches.length > 12) {
@@ -1368,15 +1384,20 @@ async function analyzeCatalogPerformance() {
   renderPerformanceSearch();
   const generation = authGeneration;
   try {
-    const response = await fetchKisPerformance(codes);
+    const guest = isPublicGuest();
+    const response = guest ? await fetchPublicPerformance(codes) : await fetchKisPerformance(codes);
     const result = await response.json();
     if (generation !== authGeneration) return;
     if (!response.ok || !Array.isArray(result.items)) throw new Error(result.error || '수익률을 조회하지 못했습니다.');
+    const returned = new Set(result.items.map(item => item.code));
     result.items.forEach(item => productInsightCache.set(item.code, item.error ? { error: item.error, periods: {} } : item));
-    catalogPerformance = { account: 'k-invest', codes: new Set(codes), loading: false, error: '', fetchedAt: result.fetchedAt || new Date().toISOString() };
+    const missing = codes.filter(code => !returned.has(code));
+    missing.forEach(code => productInsightCache.set(code, { error: '공개 분석 정보 준비 중', periods: {} }));
+    const error = missing.length ? `${missing.length}개 상품은 공개 분석 정보 준비 중입니다. 로그인 후 분석하면 공개 캐시가 갱신됩니다.` : '';
+    catalogPerformance = { account: 'k-invest', codes: new Set(codes), loading: false, error, fetchedAt: result.fetchedAt || new Date().toISOString() };
     $('#catalog-sort').value = 'return3';
     renderCatalog();
-    toast(`${codes.length}개 후보를 3개월 수익률순으로 정렬했습니다.`);
+    toast(`${codes.length - missing.length}개 후보의 ${guest ? '공개 ' : ''}수익률을 불러왔습니다.`);
   } catch (error) {
     if (generation !== authGeneration) return;
     catalogPerformance = { account: 'k-invest', codes: new Set(codes), loading: false, error: `수익률 분석 실패: ${error.message}`, fetchedAt: '' };
@@ -1406,11 +1427,13 @@ async function loadComparisonInsight(item) {
   if (!/^[0-9A-Z]{6}$/.test(item.code) || productInsightCache.has(item.code)) return;
   const generation = authGeneration;
   try {
-    const response = await fetchKisProductInsight(item.code);
+    const guest = isPublicGuest();
+    const response = guest ? await fetchPublicPerformance([item.code]) : await fetchKisProductInsight(item.code);
     const result = await response.json();
     if (generation !== authGeneration) return;
-    if (!response.ok || !result.periods) throw new Error(result.error || '가격 정보 조회 실패');
-    productInsightCache.set(item.code, result);
+    const insight = guest ? result.items?.find(candidate => candidate.code === item.code) : result;
+    if (!response.ok || !insight?.periods) throw new Error(result.error || '공개 분석 정보 준비 중');
+    productInsightCache.set(item.code, insight);
   } catch (error) {
     productInsightCache.set(item.code, { error: error.message, periods: {} });
   }
@@ -1418,7 +1441,6 @@ async function loadComparisonInsight(item) {
 }
 
 function toggleCatalogComparison(element) {
-  if (isPublicGuest()) { toast('상품 비교는 로그인 후 이용할 수 있습니다.'); return; }
   const account = element.dataset.proposalAccount || 'k-invest';
   const code = element.dataset.compareProduct;
   const key = `${account}:${code}`;
@@ -1451,9 +1473,6 @@ function renderCatalog() {
   if (isPublicGuest()) $('#catalog-account').value = 'k-invest';
   const account = $('#catalog-account').value;
   $('#catalog-account').disabled = isPublicGuest();
-  const returnSort = $('#catalog-sort').querySelector('option[value="return3"]');
-  if (returnSort) returnSort.disabled = isPublicGuest();
-  if (isPublicGuest() && $('#catalog-sort').value === 'return3') $('#catalog-sort').value = 'default';
   const notice = $('#catalog-notice');
   const list = $('#catalog-list');
   const count = $('#catalog-count');
@@ -1643,9 +1662,8 @@ function renderProductDetailPanel() {
   const beforeWeight = accountValue ? amount / accountValue * 100 : 0;
   const fromHolding = visibleHoldings().find(item => normalizedName(item.name) === normalizedName(context.from));
   const insight = productInsightCache.get(context.code);
-  const guest = isPublicGuest();
-  const loading = !guest && insight === undefined;
-  const failed = guest ? '가격 차트와 기간 수익률은 로그인 후 확인할 수 있습니다.' : insight?.error;
+  const loading = insight === undefined;
+  const failed = insight?.error;
   const metrics = insight?.periods || context.periods || {};
   const currentTarget = visibleHoldings().find(item => item.code === context.code);
   const currentTargetValue = currentTarget?.value || 0;
@@ -1659,7 +1677,7 @@ function renderProductDetailPanel() {
     <h2 id="product-detail-title">${escapeHtml(profile.name)}</h2>
     <p class="detail-subtitle">${escapeHtml(profile.code)} · ${escapeHtml(profile.category)}${sourceLink}</p>
     <section class="detail-section"><div class="detail-section-head"><span>1</span><div><h3>가격 추세</h3><p>최근 30거래일 일봉입니다. 상장상품이 아닌 펀드는 일봉 차트가 제공되지 않을 수 있습니다.</p></div></div>${loading ? '<div class="detail-loading">가격 조회 중…</div>' : failed ? `<div class="detail-chart-empty">${escapeHtml(insight.error)}</div>` : insight?.candles?.length ? candleChart(insight.candles) : '<div class="detail-chart-empty">이 상품은 조회 가능한 시장 가격 차트가 없습니다.</div>'}</section>
-    <section class="detail-section"><div class="detail-section-head"><span>2</span><div><h3>기간 수익률·변동 확인</h3><p>단기 수익률만 보고 교체하지 않고, 1·3·6개월 흐름을 비교합니다.</p></div></div><div class="detail-stats"><div><small>1개월</small><b>${guest ? '로그인 후' : loading ? '조회 중' : insightRate(metrics.oneMonth)}</b></div><div><small>3개월</small><b>${guest ? '로그인 후' : loading ? '조회 중' : insightRate(metrics.threeMonths)}</b></div><div><small>6개월</small><b>${guest ? '로그인 후' : loading ? '조회 중' : insightRate(metrics.sixMonths)}</b></div></div></section>
+    <section class="detail-section"><div class="detail-section-head"><span>2</span><div><h3>기간 수익률·변동 확인</h3><p>단기 수익률만 보고 교체하지 않고, 1·3·6개월 흐름을 비교합니다.</p></div></div><div class="detail-stats"><div><small>1개월</small><b>${loading ? '조회 중' : insightRate(metrics.oneMonth)}</b></div><div><small>3개월</small><b>${loading ? '조회 중' : insightRate(metrics.threeMonths)}</b></div><div><small>6개월</small><b>${loading ? '조회 중' : insightRate(metrics.sixMonths)}</b></div></div></section>
     <section class="detail-section"><div class="detail-section-head"><span>3</span><div><h3>무엇을 사는지</h3><p>${escapeHtml(profile.strategy)}</p></div></div><div class="detail-facts"><div><small>총보수</small><b>${escapeHtml(profile.fee)}</b></div><div><small>한도 분류</small><b>${escapeHtml(tdfLimit)}</b></div><div><small>핵심 위험</small><b>${escapeHtml(profile.risk)}</b></div></div></section>
     ${proposalSection}
     <p class="detail-disclaimer">가격·수익률은 조회 시점 정보이며 미래 수익을 보장하지 않습니다. 실제 매수 가능 여부와 적격 TDF 분류는 한국투자증권 주문 화면에서 최종 확인하세요.</p>
@@ -1675,7 +1693,6 @@ async function openProductDetail(context) {
   const generation = authGeneration;
   productDetailContext = context;
   renderProductDetailPanel();
-  if (isPublicGuest()) return;
   if (productInsightCache.has(context.code)) return;
   if (context.periods && !/^[0-9A-Z]{6}$/.test(context.code || '')) {
     productInsightCache.set(context.code || context.name, { candles: [], periods: context.periods });
@@ -1688,12 +1705,14 @@ async function openProductDetail(context) {
     return;
   }
   try {
-    const response = await fetchKisProductInsight(context.code);
+    const guest = isPublicGuest();
+    const response = guest ? await fetchPublicPerformance([context.code]) : await fetchKisProductInsight(context.code);
     const result = await response.json();
     if (generation !== authGeneration) return;
     if (!response.ok) throw new Error(result.error || '가격 정보를 불러오지 못했습니다.');
-    if (!Array.isArray(result.candles) || !result.periods) throw new Error('상세 가격 분석 기능이 아직 배포되지 않았습니다.');
-    productInsightCache.set(context.code, result);
+    const insight = guest ? result.items?.find(candidate => candidate.code === context.code) : result;
+    if (!Array.isArray(insight?.candles) || !insight?.periods) throw new Error(guest ? '공개 분석 정보 준비 중입니다. 로그인 후 분석하면 공개 캐시가 갱신됩니다.' : '상세 가격 분석 기능이 아직 배포되지 않았습니다.');
+    productInsightCache.set(context.code, insight);
   } catch (error) {
     if (generation !== authGeneration) return;
     productInsightCache.set(context.code, { error: `가격 정보 조회 실패: ${error.message}` });
