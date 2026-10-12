@@ -5,6 +5,16 @@ const WOORI_CATALOG_STORAGE_KEY = 'retirepilot-woori-catalog';
 const WOORI_PUBLIC_TDF_STORAGE_KEY = 'retirepilot-woori-public-tdf';
 const runtimeConfig = window.RETIREPILOT_CONFIG || {};
 const hostedMode = Boolean(runtimeConfig.supabaseUrl && runtimeConfig.supabasePublishableKey && runtimeConfig.functionUrl);
+
+function clearHostedPrivateSnapshots() {
+  if (!hostedMode) return;
+  try {
+    localStorage.removeItem(KIS_SNAPSHOT_STORAGE_KEY);
+    localStorage.removeItem(KIS_TREND_STORAGE_KEY);
+  } catch (_) { /* Storage may be unavailable in private browsing. */ }
+}
+
+clearHostedPrivateSnapshots();
 const AUTH_STORAGE_KEY = 'retirepilot-auth-session';
 const VIEW_STORAGE_KEY = 'retirepilot-active-view';
 const HOLDINGS_EXPORT_VERSION = 1;
@@ -731,6 +741,10 @@ function loadKisSnapshot() {
 }
 
 function saveKisSnapshot(snapshot) {
+  if (hostedMode) {
+    clearHostedPrivateSnapshots();
+    return;
+  }
   try { localStorage.setItem(KIS_SNAPSHOT_STORAGE_KEY, JSON.stringify(snapshot)); }
   catch (_) { /* The current page can still use the live snapshot. */ }
 }
@@ -744,6 +758,10 @@ function loadTrendSnapshot() {
 }
 
 function saveTrendSnapshot(snapshot) {
+  if (hostedMode) {
+    clearHostedPrivateSnapshots();
+    return;
+  }
   try { localStorage.setItem(KIS_TREND_STORAGE_KEY, JSON.stringify(snapshot)); }
   catch (_) { /* The current page can still use the trend result. */ }
 }
