@@ -1376,14 +1376,14 @@ function renderPerformanceSearch() {
   const button = $('#catalog-performance-btn');
   if (!host || !button) return;
   const account = $('#catalog-account').value;
+  host.hidden = account === 'woori-dc';
+  if (host.hidden) return;
   const guest = isPublicGuest();
-  const unavailable = account !== 'k-invest';
-  button.disabled = catalogPerformance.loading || unavailable;
+  button.disabled = catalogPerformance.loading;
   button.textContent = catalogPerformance.loading ? '수익률 조회 중…' : guest ? '공개 분석 보기' : '현재 결과 분석';
   host.classList.toggle('is-loading', catalogPerformance.loading);
   const message = host.querySelector('p');
-  if (unavailable) message.textContent = '현재 자동 수익률 순위는 한국투자증권 IRP 공식 상장상품 목록에서 제공합니다.';
-  else if (catalogPerformance.error) message.textContent = catalogPerformance.error;
+  if (catalogPerformance.error) message.textContent = catalogPerformance.error;
   else if (catalogPerformance.codes.size) message.textContent = `${catalogPerformance.codes.size}개 후보를 분석했습니다. 3개월 수익률순이며 1·6개월 흐름도 함께 확인하세요.`;
   else message.textContent = `${guest ? '로그인 사용자가 갱신한 공개 캐시를 사용합니다. ' : ''}한 번에 최대 12개까지 분석할 수 있습니다. 상품명·테마로 검색 결과를 12개 이하로 좁혀주세요.`;
 }
@@ -1487,6 +1487,92 @@ function toggleCatalogComparison(element) {
   renderCatalogComparison();
 }
 
+function wooriFundRate(item, period) {
+  const fields = {
+    oneMonth: ['oneMonth'],
+    threeMonth: ['threeMonth', 'threeMonths'],
+    sixMonth: ['sixMonth', 'sixMonths'],
+    twelveMonth: ['oneYear', 'twelveMonth', 'twelveMonths'],
+  };
+  const raw = fields[period].map(key => item[key]).find(value => value !== undefined && value !== null && value !== '' && value !== '—');
+  const value = Number.parseFloat(String(raw ?? '').replace('%', ''));
+  return Number.isFinite(value) ? value : null;
+}
+
+function filteredWooriFunds(items) {
+  const query = $('#catalog-query').value.trim().toLocaleLowerCase('ko-KR');
+  const kind = $('#catalog-kind').value;
+  return items.filter(item => (kind === 'all' || catalogProductType(item) === kind) && (!query || `${item.name} ${item.code} ${item.category || ''} ${item.manager || ''}`.toLocaleLowerCase('ko-KR').includes(query)));
+}
+
+function percentileMap(items, valueFor, { lowerIsBetter = false } = {}) {
+  const ranked = items.map(item => ({ item, value: valueFor(item) })).filter(entry => Number.isFinite(entry.value)).sort((a, b) => a.value - b.value);
+  const denominator = Math.max(ranked.length - 1, 1);
+  return new Map(ranked.map((entry, index) => [entry.item, lowerIsBetter ? 1 - index / denominator : index / denominator]));
+}
+
+function rankedWooriFunds(items) {
+  const eligible = items.filter(item => ['threeMonth', 'sixMonth', 'twelveMonth'].every(period => wooriFundRate(item, period) !== null));
+  const weights = { twelveMonth: .45, sixMonth: .30, threeMonth: .15, fee: .10 };
+  const twelveScores = percentileMap(eligible, item => wooriFundRate(item, 'twelveMonth'));
+  const sixScores = percentileMap(eligible, item => wooriFundRate(item, 'sixMonth'));
+  const threeScores = percentileMap(eligible, item => wooriFundRate(item, 'threeMonth'));
+  const feeScores = percentileMap(eligible, item => catalogFeeValue(item), { lowerIsBetter: true });
+  const ranked = eligible.map(item => ({
+    item,
+    score: (twelveScores.get(item) || 0) * weights.twelveMonth
+      + (sixScores.get(item) || 0) * weights.sixMonth
+      + (threeScores.get(item) || 0) * weights.threeMonth
+      + (feeScores.get(item) ?? .5) * weights.fee,
+    longTermPositive: wooriFundRate(item, 'twelveMonth') > 0 && wooriFundRate(item, 'sixMonth') > 0,
+  })).sort((a, b) => Number(b.longTermPositive) - Number(a.longTermPositive) || b.score - a.score || String(a.item.name).localeCompare(String(b.item.name), 'ko-KR'));
+  const selected = [];
+  const managerCounts = new Map();
+  for (const entry of ranked) {
+    const manager = entry.item.manager || '운용사 미표기';
+    if ((managerCounts.get(manager) || 0) >= 2) continue;
+    selected.push(entry.item);
+    managerCounts.set(manager, (managerCounts.get(manager) || 0) + 1);
+    if (selected.length === 5) break;
+  }
+  return selected.length === 5 ? selected : [...selected, ...ranked.map(entry => entry.item).filter(item => !selected.includes(item))].slice(0, 5);
+}
+
+function wooriShortlistCard(item, index) {
+  const detailKey = item.code || `fund:${item.name}`;
+  const feeValue = catalogFeeValue(item);
+  const fee = feeValue === null ? '보수 미표기' : `${feeValue.toFixed(3)}%`;
+  const manager = item.manager || '운용사 미표기';
+  const category = item.category || item.kind || '상품 분류 확인 필요';
+  const periods = {
+    oneMonth: wooriFundRate(item, 'oneMonth'),
+    threeMonths: wooriFundRate(item, 'threeMonth'),
+    sixMonths: wooriFundRate(item, 'sixMonth'),
+  };
+  const selected = catalogComparison.some(candidate => candidate.key === catalogCompareKey({ ...item, account: 'woori-dc' }));
+  const detailAttributes = `data-product-detail="${escapeHtml(detailKey)}" data-product-name="${escapeHtml(item.name)}" data-product-category="${escapeHtml(category)}" data-product-fee="${escapeHtml(fee)}" data-product-one-month="${escapeHtml(periods.oneMonth ?? '')}" data-product-three-months="${escapeHtml(periods.threeMonths ?? '')}" data-product-six-months="${escapeHtml(periods.sixMonths ?? '')}" data-proposal-account="woori-dc"`;
+  const compareAttributes = `data-compare-product="${escapeHtml(detailKey)}" data-product-name="${escapeHtml(item.name)}" data-product-category="${escapeHtml(category)}" data-product-manager="${escapeHtml(manager)}" data-product-fee="${escapeHtml(fee)}" data-product-one-month="${escapeHtml(periods.oneMonth ?? '')}" data-product-three-months="${escapeHtml(periods.threeMonths ?? '')}" data-product-six-months="${escapeHtml(periods.sixMonths ?? '')}" data-proposal-account="woori-dc"`;
+  return `<article class="woori-shortlist-card"><span class="woori-shortlist-rank">${index + 1}</span><div class="woori-shortlist-title"><small>${escapeHtml(catalogProductType(item))} · ${escapeHtml(manager)}</small><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.risk || '위험등급 미표기')} · 총보수 ${escapeHtml(fee)}</span></div><dl><div><dt>3개월</dt><dd>${insightRate(periods.threeMonths)}</dd></div><div><dt>6개월</dt><dd>${insightRate(periods.sixMonths)}</dd></div><div><dt>12개월</dt><dd>${insightRate(wooriFundRate(item, 'twelveMonth'))}</dd></div></dl><div class="woori-shortlist-actions"><button class="review-btn" type="button" ${detailAttributes}>상세 보기</button><button class="compare-toggle${selected ? ' selected' : ''}" type="button" ${compareAttributes} aria-pressed="${selected}">${selected ? '비교 해제' : '비교'}</button></div></article>`;
+}
+
+function renderWooriShortlist(items) {
+  const host = $('#woori-shortlist');
+  if (!host) return;
+  if (!items.length) {
+    host.hidden = true;
+    host.innerHTML = '';
+    return;
+  }
+  const matches = filteredWooriFunds(items);
+  const shortlist = rankedWooriFunds(matches);
+  host.hidden = false;
+  if (!shortlist.length) {
+    host.innerHTML = '<div class="woori-shortlist-head"><div><span>자동 추림</span><h3>장기 수익률 데이터가 있는 후보가 없습니다.</h3><p>검색 조건을 바꾸거나 전체 유형으로 다시 확인해보세요.</p></div></div>';
+    return;
+  }
+  host.innerHTML = `<div class="woori-shortlist-head"><div><span>우리은행 공개 목록 · 자동 추림</span><h3>먼저 확인할 후보 ${shortlist.length}개</h3><p>현재 검색 조건 ${matches.length.toLocaleString('ko-KR')}개 중 12개월 45%·6개월 30%·3개월 15%·낮은 보수 10%의 순위 점수를 적용했습니다. 한 운용사에 쏠리지 않도록 최대 2개만 포함합니다.</p></div><b>${matches.length.toLocaleString('ko-KR')}개 → ${shortlist.length}개</b></div><div class="woori-shortlist-grid">${shortlist.map(wooriShortlistCard).join('')}</div><p class="woori-shortlist-caution">과거 수익률은 미래 성과를 보장하지 않습니다. 이 순위에는 회사 DC 상품POOL 가입 가능 여부는 포함하지 않습니다. 상세 내용을 비교한 뒤 최종 후보만 우리은행 상품 변경 화면에서 확인하세요.</p>`;
+}
+
 function renderCatalog() {
   if (isPublicGuest()) $('#catalog-account').value = 'k-invest';
   const account = $('#catalog-account').value;
@@ -1501,14 +1587,14 @@ function renderCatalog() {
     const isPublicList = !verifiedItems.length && publicItems.length > 0;
     const items = verifiedItems.length ? verifiedItems : publicItems;
     notice.innerHTML = verifiedItems.length ? `<strong>우리은행 DC · 확인한 후보</strong><p>${escapeHtml(new Date(wooriCatalogue.importedAt).toLocaleString('ko-KR'))}에 확인한 ${verifiedItems.length}개입니다. 실제 주문 가능 여부와 한도 분류는 우리은행 상품 변경 화면에서 최종 확인하세요.</p>` : isPublicList ? `<strong>우리은행 공개 퇴직연금 펀드 후보 · ${publicItems.length}개</strong><p>${escapeHtml(new Date(wooriPublicFunds.fetchedAt).toLocaleString('ko-KR'))} 기준 우리은행 공식 공개 목록입니다. 전체 목록을 캡처할 필요 없이 후보를 추릴 수 있습니다. 단, 회사 DC 상품POOL 편입 여부는 최종 후보만 매수 전 확인합니다.</p>` : '<strong>우리은행 공개 퇴직연금 펀드 후보</strong><p>우리은행 공식 공개 목록을 자동으로 불러와 수익률·위험등급·보수로 후보를 추립니다. 회사별 DC 라인업 편입 여부는 최종 후보만 실제 교체 직전에 확인하면 됩니다.</p><button class="outline-btn" type="button" data-load-woori-funds>공개 펀드 목록 불러오기</button>';
-    const query = $('#catalog-query').value.trim().toLocaleLowerCase('ko-KR');
-    const kind = $('#catalog-kind').value;
-    const matches = sortedCatalogItems(items.filter(item => (kind === 'all' || catalogProductType(item) === kind) && (!query || `${item.name} ${item.code} ${item.category || ''} ${item.manager || ''}`.toLocaleLowerCase('ko-KR').includes(query))));
+    const matches = sortedCatalogItems(filteredWooriFunds(items));
+    renderWooriShortlist(isPublicList ? publicItems : []);
     count.textContent = isPublicList ? `${matches.length}개 검색됨 · 우리은행 공개 펀드` : `확인한 후보 ${matches.length}개`;
     list.innerHTML = matches.slice(0, 100).map(item => catalogCard(item, 'woori-dc', { publicList: isPublicList })).join('') || '<div class="empty-state">등록된 상품이 없거나 검색 결과가 없습니다.</div>';
     if (matches.length > 100) list.insertAdjacentHTML('beforeend', '<p class="catalog-more">처음 100개만 표시됩니다. 목표연도나 상품명으로 검색 범위를 좁혀주세요.</p>');
     return;
   }
+  renderWooriShortlist([]);
   const catalog = window.KIS_CATALOG;
   if (!catalog?.items) {
     notice.textContent = '한국투자증권 공식 상품 목록을 불러오지 못했습니다.';

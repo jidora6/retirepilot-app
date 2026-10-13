@@ -1,8 +1,8 @@
-const CACHE_NAME = 'retirepilot-shell-v16';
+const CACHE_NAME = 'retirepilot-shell-v17';
 const APP_SHELL = [
   './',
   './index.html',
-  './styles.css?v=16',
+  './styles.css?v=17',
   './main.js',
   './sw-register.js',
   './kis-catalog.js',
