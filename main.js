@@ -2,7 +2,7 @@ const STORAGE_KEY = 'retirepilot-data';
 const KIS_SNAPSHOT_STORAGE_KEY = 'retirepilot-kis-snapshot';
 const KIS_TREND_STORAGE_KEY = 'retirepilot-kis-trend';
 const WOORI_CATALOG_STORAGE_KEY = 'retirepilot-woori-catalog';
-const WOORI_PUBLIC_TDF_STORAGE_KEY = 'retirepilot-woori-public-tdf';
+const WOORI_PUBLIC_FUND_STORAGE_KEY = 'retirepilot-woori-public-funds-v1';
 const runtimeConfig = window.RETIREPILOT_CONFIG || {};
 const hostedMode = Boolean(runtimeConfig.supabaseUrl && runtimeConfig.supabasePublishableKey && runtimeConfig.functionUrl);
 
@@ -192,7 +192,7 @@ async function logoutPrivateSession(options = {}) {
   kisSnapshot = null;
   trendSnapshot = null;
   wooriCatalogue = { items: [], importedAt: null };
-  wooriPublicTdf = { items: [], fetchedAt: null };
+  wooriPublicFunds = { items: [], fetchedAt: null };
   productInsightCache.clear();
   catalogComparison = [];
   catalogPerformance = { account: '', codes: new Set(), loading: false, error: '', fetchedAt: '' };
@@ -521,11 +521,11 @@ async function fetchWooriEtfQuotes(codes) {
   return response;
 }
 
-async function fetchWooriPublicTdf() {
-  if (!hostedMode) return fetch('/api/woori/public-tdf', { cache: 'no-store' });
+async function fetchWooriPublicFunds() {
+  if (!hostedMode) return fetch('/api/woori/public-funds', { cache: 'no-store' });
   if (!await ensureHostedSession()) throw new Error('먼저 운영 계정에 로그인하세요.');
   const url = new URL(runtimeConfig.functionUrl);
-  url.searchParams.set('mode', 'woori-public-tdf');
+  url.searchParams.set('mode', 'woori-public-funds');
   const response = await fetch(url, {
     headers: { apikey: runtimeConfig.supabasePublishableKey, authorization: `Bearer ${authSession.access_token}` },
     cache: 'no-store',
@@ -717,20 +717,20 @@ function saveWooriCatalog(catalogue) {
 
 let wooriCatalogue = loadWooriCatalog();
 
-function loadWooriPublicTdf() {
+function loadWooriPublicFunds() {
   try {
-    const saved = JSON.parse(localStorage.getItem(WOORI_PUBLIC_TDF_STORAGE_KEY) || 'null');
+    const saved = JSON.parse(localStorage.getItem(WOORI_PUBLIC_FUND_STORAGE_KEY) || 'null');
     if (saved && Array.isArray(saved.items)) return saved;
   } catch (_) { /* A stale public catalogue can be fetched again. */ }
   return { items: [], fetchedAt: null };
 }
 
-function saveWooriPublicTdf(catalogue) {
-  try { localStorage.setItem(WOORI_PUBLIC_TDF_STORAGE_KEY, JSON.stringify(catalogue)); }
-  catch (_) { toast('우리은행 공개 TDF 목록 저장에 실패했습니다.'); }
+function saveWooriPublicFunds(catalogue) {
+  try { localStorage.setItem(WOORI_PUBLIC_FUND_STORAGE_KEY, JSON.stringify(catalogue)); }
+  catch (_) { toast('우리은행 공개 퇴직연금 펀드 목록 저장에 실패했습니다.'); }
 }
 
-let wooriPublicTdf = loadWooriPublicTdf();
+let wooriPublicFunds = loadWooriPublicFunds();
 
 function loadKisSnapshot() {
   try {
@@ -1203,18 +1203,18 @@ async function refreshWooriEtfEstimates() {
   toast(`우리은행 DC ETF ${updated}개의 KIS 시세 추정값을 반영했습니다. 은행 공식 잔고와는 차이가 날 수 있습니다.`);
 }
 
-async function refreshWooriPublicTdf() {
+async function refreshWooriPublicFunds() {
   const generation = authGeneration;
-  const response = await fetchWooriPublicTdf();
+  const response = await fetchWooriPublicFunds();
   const result = await response.json();
   if (generation !== authGeneration) return;
-  if (!response.ok || !Array.isArray(result.items)) throw new Error(result.error || '우리은행 공개 TDF 목록을 불러오지 못했습니다.');
-  wooriPublicTdf = { items: result.items, fetchedAt: result.fetchedAt || new Date().toISOString(), source: result.source || '우리은행 공개 TDF 목록' };
-  saveWooriPublicTdf(wooriPublicTdf);
+  if (!response.ok || !Array.isArray(result.items)) throw new Error(result.error || '우리은행 공개 퇴직연금 펀드 목록을 불러오지 못했습니다.');
+  wooriPublicFunds = { items: result.items, fetchedAt: result.fetchedAt || new Date().toISOString(), source: result.source || '우리은행 공개 퇴직연금 펀드 목록' };
+  saveWooriPublicFunds(wooriPublicFunds);
   $('#catalog-account').value = 'woori-dc';
   $('#catalog-kind').value = 'all';
   renderCatalog();
-  toast(`우리은행 공개 TDF ${result.items.length}개를 후보 탐색용으로 불러왔습니다.`);
+  toast(`우리은행 공개 퇴직연금 펀드 ${result.items.length}개를 후보 탐색용으로 불러왔습니다.`);
 }
 
 function renderTrendPanel() {
@@ -1295,7 +1295,7 @@ function renderBuyCandidates() {
   host.innerHTML = `<div class="buy-candidates-head"><div><h3>우선 검토 후보</h3><p>현재 보유 비중·중복·퇴직연금 한도를 바탕으로 먼저 살펴볼 상품입니다. 자동 매수 추천이 아닙니다.</p></div><span class="status-tag good">검토용</span></div>
     <article class="buy-candidate-card"><div class="buy-candidate-main"><span class="buy-candidate-icon">◎</span><div><span class="buy-kicker">한국투자증권 IRP · 교체 / 신규 납입 후보</span><h4>${escapeHtml(tdfName)}</h4><p><b>${escapeHtml(tdf?.code || '442560')}</b> · 적격 TDF · ${escapeHtml(tdfFee)}</p><p class="buy-reason">현재 보유 비중과 투자 목표시점을 확인한 뒤 분산 후보로 검토하세요. 적격 TDF도 원금보장상품이 아니며 미래 수익을 보장하지 않습니다.</p></div></div><div class="buy-candidate-action"><span>부분 교체 예시</span><strong>${proposalTotal ? won(proposalTotal) : '비중 검토 후 산정'}</strong><small>현재 보유액 기준 가정 · 주문 아님</small><button class="review-btn" type="button" data-catalog-candidate="442560">공식 목록에서 보기</button></div></article>
     <div class="buy-candidate-note"><strong>지금은 추가매수보다 보류할 상품</strong><p>좋은 상품인지와 지금 더 사도 되는지는 다릅니다. 현재 비중이 높은 상품은 신규 매수 후보에서 제외합니다.</p><div class="buy-hold-list">${holdRow(sp500)}${holdRow(gold)}${domestic.length ? `<article class="buy-hold-row"><div><strong>우리은행 DC 국내주식 ETF</strong><small>${domestic.map(item => escapeHtml(item.name)).join(' · ')} · 합산 비중 ${domestic.reduce((sum, item) => sum + weight(item), 0).toFixed(1)}%</small></div><span class="status-tag watch">라인업 확인 전 보류</span></article>` : ''}</div></div>
-    <div class="buy-candidate-foot">우리은행 DC는 공개 TDF 목록을 후보 탐색에 사용하고, 회사별 상품POOL 편입 여부는 실제 교체 직전에 확인합니다. 한국투자 IRP는 ${escapeHtml(window.KIS_CATALOG?.asOf || '공식 기준일')} 기준 공식 ETF·리츠 목록에서 후보 존재를 확인했으며, 실제 주문 화면의 매수가능 여부와 한도 분류가 최종입니다.</div>`;
+    <div class="buy-candidate-foot">우리은행 DC는 공식 공개 퇴직연금 펀드 목록을 후보 탐색에 사용하고, 회사별 상품POOL 편입 여부는 최종 후보만 실제 교체 직전에 확인합니다. 한국투자 IRP는 ${escapeHtml(window.KIS_CATALOG?.asOf || '공식 기준일')} 기준 공식 ETF·리츠 목록에서 후보 존재를 확인했으며, 실제 주문 화면의 매수가능 여부와 한도 분류가 최종입니다.</div>`;
 }
 
 function catalogProductType(item) {
@@ -1318,8 +1318,8 @@ function catalogFeeValue(item) {
 function sortedCatalogItems(items) {
   const sort = $('#catalog-sort')?.value || 'default';
   if (sort === 'return3') return [...items].sort((a, b) => {
-    const left = productInsightCache.get(a.code)?.periods?.threeMonths;
-    const right = productInsightCache.get(b.code)?.periods?.threeMonths;
+    const left = productInsightCache.get(a.code)?.periods?.threeMonths ?? Number.parseFloat(a.threeMonth ?? a.threeMonths);
+    const right = productInsightCache.get(b.code)?.periods?.threeMonths ?? Number.parseFloat(b.threeMonth ?? b.threeMonths);
     const leftValue = Number.isFinite(left) ? left : Number.NEGATIVE_INFINITY;
     const rightValue = Number.isFinite(right) ? right : Number.NEGATIVE_INFINITY;
     return rightValue - leftValue || String(a.name).localeCompare(String(b.name), 'ko-KR');
@@ -1497,14 +1497,14 @@ function renderCatalog() {
   renderPerformanceSearch();
   if (account === 'woori-dc') {
     const verifiedItems = wooriCatalogue.items || [];
-    const publicItems = wooriPublicTdf.items || [];
+    const publicItems = wooriPublicFunds.items || [];
     const isPublicList = !verifiedItems.length && publicItems.length > 0;
     const items = verifiedItems.length ? verifiedItems : publicItems;
-    notice.innerHTML = verifiedItems.length ? `<strong>우리은행 DC · 확인한 후보</strong><p>${escapeHtml(new Date(wooriCatalogue.importedAt).toLocaleString('ko-KR'))}에 확인한 ${verifiedItems.length}개입니다. 실제 주문 가능 여부와 한도 분류는 우리은행 상품 변경 화면에서 최종 확인하세요.</p>` : isPublicList ? `<strong>우리은행 공개 TDF 후보 · ${publicItems.length}개</strong><p>${escapeHtml(new Date(wooriPublicTdf.fetchedAt).toLocaleString('ko-KR'))} 기준 공개 목록입니다. 사용자님의 회사 DC 상품POOL 편입 여부는 아직 확인되지 않았습니다.</p>` : '<strong>우리은행 공개 TDF 후보</strong><p>공개 TDF 목록을 자동 수집해 후보 탐색에 사용합니다. 회사별 DC 라인업 편입 여부는 실제 교체 직전에 상품명 하나만 검색해 확인하면 됩니다.</p><button class="outline-btn" type="button" data-load-woori-tdf>공개 TDF 목록 불러오기</button>';
+    notice.innerHTML = verifiedItems.length ? `<strong>우리은행 DC · 확인한 후보</strong><p>${escapeHtml(new Date(wooriCatalogue.importedAt).toLocaleString('ko-KR'))}에 확인한 ${verifiedItems.length}개입니다. 실제 주문 가능 여부와 한도 분류는 우리은행 상품 변경 화면에서 최종 확인하세요.</p>` : isPublicList ? `<strong>우리은행 공개 퇴직연금 펀드 후보 · ${publicItems.length}개</strong><p>${escapeHtml(new Date(wooriPublicFunds.fetchedAt).toLocaleString('ko-KR'))} 기준 우리은행 공식 공개 목록입니다. 전체 목록을 캡처할 필요 없이 후보를 추릴 수 있습니다. 단, 회사 DC 상품POOL 편입 여부는 최종 후보만 매수 전 확인합니다.</p>` : '<strong>우리은행 공개 퇴직연금 펀드 후보</strong><p>우리은행 공식 공개 목록을 자동으로 불러와 수익률·위험등급·보수로 후보를 추립니다. 회사별 DC 라인업 편입 여부는 최종 후보만 실제 교체 직전에 확인하면 됩니다.</p><button class="outline-btn" type="button" data-load-woori-funds>공개 펀드 목록 불러오기</button>';
     const query = $('#catalog-query').value.trim().toLocaleLowerCase('ko-KR');
     const kind = $('#catalog-kind').value;
     const matches = sortedCatalogItems(items.filter(item => (kind === 'all' || catalogProductType(item) === kind) && (!query || `${item.name} ${item.code} ${item.category || ''} ${item.manager || ''}`.toLocaleLowerCase('ko-KR').includes(query))));
-    count.textContent = isPublicList ? `${matches.length}개 검색됨 · 공개 TDF` : `확인한 후보 ${matches.length}개`;
+    count.textContent = isPublicList ? `${matches.length}개 검색됨 · 우리은행 공개 펀드` : `확인한 후보 ${matches.length}개`;
     list.innerHTML = matches.slice(0, 100).map(item => catalogCard(item, 'woori-dc', { publicList: isPublicList })).join('') || '<div class="empty-state">등록된 상품이 없거나 검색 결과가 없습니다.</div>';
     if (matches.length > 100) list.insertAdjacentHTML('beforeend', '<p class="catalog-more">처음 100개만 표시됩니다. 목표연도나 상품명으로 검색 범위를 좁혀주세요.</p>');
     return;
@@ -1626,7 +1626,7 @@ function productProfile(context) {
   if (known) return known;
   const item = (window.KIS_CATALOG?.items || []).find(candidate => candidate.code === context.code)
     || (wooriCatalogue.items || []).find(candidate => candidate.code === context.code)
-    || (wooriPublicTdf.items || []).find(candidate => candidate.code === context.code);
+    || (wooriPublicFunds.items || []).find(candidate => candidate.code === context.code);
   return {
     name: context.name || item?.name || context.code || '상품 상세',
     code: context.code?.startsWith('fund:') ? '상품코드 미확인' : context.code || item?.code || '상품코드 미확인',
@@ -1855,8 +1855,8 @@ document.addEventListener('click', event => {
   if (event.target.closest('[data-refresh-woori-values]')) {
     refreshWooriEtfEstimates().catch(error => toast(error.message));
   }
-  if (event.target.closest('[data-load-woori-tdf]')) {
-    refreshWooriPublicTdf().catch(error => toast(error.message));
+  if (event.target.closest('[data-load-woori-funds]')) {
+    refreshWooriPublicFunds().catch(error => toast(error.message));
   }
   if (event.target.closest('[data-export-holdings]')) {
     try { exportHoldingsJson(); }
