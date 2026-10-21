@@ -125,12 +125,16 @@ function limitSummary(accountId) {
   for (const item of holdings) buckets[inferredLimitClass(item)] += Number(item.value || 0);
   const total = holdings.reduce((sum, item) => sum + Number(item.value || 0), 0);
   const cap = total * 0.7;
+  // 분류가 확정되지 않은 상품은 분모(총액)에 들어가므로 분자에도 위험자산으로 넣어 한도 사용률을 낮게 보이지 않게 한다.
+  const assumedRisk = buckets['risk-70'] + buckets.unverified;
   return {
     total,
     cap,
-    remaining: cap - buckets['risk-70'],
+    remaining: cap - assumedRisk,
     buckets,
-    riskShare: total ? buckets['risk-70'] / total * 100 : 0
+    assumedRisk,
+    unverified: buckets.unverified,
+    riskShare: total ? assumedRisk / total * 100 : 0
   };
 }
 
@@ -954,7 +958,7 @@ function renderRecommendations() {
 }
 
 function limitCard(account, summary) {
-  const utilization = summary.cap ? summary.buckets['risk-70'] / summary.cap * 100 : 0;
+  const utilization = summary.cap ? summary.assumedRisk / summary.cap * 100 : 0;
   const state = utilization > 100 ? 'danger' : utilization > 90 ? 'warning' : '';
   const remaining = summary.remaining >= 0 ? `추가 여유 ${won(summary.remaining)}` : `가정상 초과 ${won(Math.abs(summary.remaining))}`;
   return `<article class="limit-card">
@@ -963,14 +967,14 @@ function limitCard(account, summary) {
     <strong class="limit-number">${summary.riskShare.toFixed(1)}%</strong>
     <span class="limit-caption">일반 위험자산 비중 · 법정 한도 70%</span>
     <div class="limit-track ${state}"><i style="width:${Math.min(utilization, 100)}%"></i></div>
-    <div class="limit-caption">위험자산 ${won(summary.buckets['risk-70'])} / 한도 ${won(summary.cap)}</div>
+    <div class="limit-caption">위험자산 ${won(summary.assumedRisk)}${summary.unverified ? ` (확인 필요 ${won(summary.unverified)} 포함)` : ''} / 한도 ${won(summary.cap)}</div>
     <div class="limit-meta"><span>일반 한도 여유<b>${remaining}</b></span><span>적격 TDF 100%군<b>${won(summary.buckets['qualified-tdf'])}</b></span></div>
   </article>`;
 }
 
 function renderLimits() {
   const accounts = [
-    { id: null, name: '전체 계좌 · 추정', note: '확인 필요 상품은 한도 계산에서 제외' },
+    { id: null, name: '전체 계좌 · 추정', note: '확인 필요 상품은 위험자산으로 보수적으로 계산' },
     { id: 'k-invest', name: '한국투자증권 IRP', note: '실제 주문 화면의 위험평가액을 최종 확인' },
     { id: 'woori-dc', name: '우리은행 DC', note: '회사별 상품 라인업과 분류를 확인' }
   ];
@@ -979,7 +983,7 @@ function renderLimits() {
     'safe-100': '원리금보장·현금성으로 임시 분류',
     'risk-70': '보수적으로 일반 위험자산으로 임시 분류',
     'qualified-tdf': '적격 여부를 금융기관 상품설명서에서 확인',
-    unverified: '분류 확정 전에는 한도 계산에서 제외'
+    unverified: '분류 확정 전에는 위험자산으로 보수적으로 계산'
   };
   $('#limit-holdings').innerHTML = visibleHoldings().map(item => {
     const limitClass = inferredLimitClass(item);
@@ -1067,9 +1071,17 @@ function findColumn(headers, aliases) {
   return headers.findIndex(header => aliases.some(alias => normalHeader(header).includes(alias)));
 }
 
+// 은행 표의 숫자 표기: 1,234 / -9.21 / (9.21) / −9.21(유니코드 마이너스) / ▼9.21 / △3.5. 숫자 앞의 음수 표시와 괄호는 음수로 읽는다.
 function pastedNumber(value) {
-  const parsed = Number(String(value ?? '').replaceAll(/[^0-9.-]/g, ''));
-  return Number.isFinite(parsed) ? parsed : null;
+  const text = String(value ?? '').trim();
+  const match = text.match(/[0-9][0-9,]*(?:\.[0-9]+)?|\.[0-9]+/);
+  if (!match) return null;
+  const parsed = Number(match[0].replaceAll(',', ''));
+  if (!Number.isFinite(parsed) || parsed === 0) return Number.isFinite(parsed) ? 0 : null;
+  const before = text.slice(0, match.index);
+  const after = text.slice(match.index + match[0].length);
+  const negative = /[-−‐‑–—－▼▽↓]/.test(before) || (/[(（]/.test(before) && /[)）]/.test(after));
+  return negative ? -parsed : parsed;
 }
 
 function parseWooriPastedTable(text, mode) {
@@ -1095,11 +1107,17 @@ function parseWooriPastedTable(text, mode) {
   return parsed;
 }
 
+// 금(金) 상품만 금현물로 본다. '금'이 들어간 다른 낱말(금융, 원리금보장, 퇴직연금, 금융채 등)은 해당하지 않는다.
+function isGoldProductName(name) {
+  const text = String(name).toLocaleLowerCase('ko-KR');
+  return /금현물|krx금|골드|gold/.test(text) || /(^|[^가-힣])금($|[^가-힣])/.test(text);
+}
+
 function guessWooriType(name) {
   const normalized = normalizedName(name);
   if (normalized.includes('정기예금')) return '정기예금';
-  if (normalized.includes('현금')) return '현금성';
-  if (normalized.includes('금')) return '금현물';
+  if (normalized.includes('현금') && !normalized.includes('현금흐름')) return '현금성';
+  if (isGoldProductName(name)) return '금현물';
   if (normalized.includes('커버드콜')) return '커버드콜';
   if (normalized.includes('s&p') || normalized.includes('미국')) return '미국주식';
   if (normalized.includes('200') || normalized.includes('top')) return '국내주식 집중형';
@@ -1254,7 +1272,7 @@ function renderLimitSimulation() {
     result.innerHTML = `<strong>일반 위험자산 한도 사용액은 변하지 않습니다.</strong><span>${limitLabels[limitClass]} ${won(amount)}을 가정했습니다. 적격 TDF 여부 또는 원리금보장 여부는 실제 매수 화면에서 확인하세요.</span>`;
     return;
   }
-  const projectedRisk = summary.buckets['risk-70'] + amount;
+  const projectedRisk = summary.assumedRisk + amount;
   const projectedTotal = summary.total + amount;
   const projectedCap = projectedTotal * 0.7;
   const gap = projectedCap - projectedRisk;
