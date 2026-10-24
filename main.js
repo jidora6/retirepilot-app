@@ -54,6 +54,17 @@ let trendSnapshot = hostedMode ? null : loadTrendSnapshot();
 let overviewDetail = null;
 let productDetailContext = null;
 let productInsightCache = new Map();
+let publicPerformancePromise = null;   // performance.json 한 번만 읽기(실패하면 다음에 다시 시도)
+let marketStatus = null;               // market.json: 코스피, S&P500의 200일선과 급락 경보 상태(매일 갱신되는 공개 파일)
+const RULE_TARGET_KEY = 'retirepilot-rule-target';
+function loadRuleTarget() {
+  try {
+    const saved = Number(localStorage.getItem(RULE_TARGET_KEY));
+    if (saved >= 0.5 && saved <= 0.7) return saved;
+  } catch (_) { /* 저장소를 못 쓰면 기본값 */ }
+  return 0.6;
+}
+let ruleTarget = loadRuleTarget();
 let catalogComparison = [];
 let catalogPerformance = { account: '', codes: new Set(), loading: false, error: '', fetchedAt: '' };
 let wooriImportMode = null;
@@ -109,10 +120,21 @@ const productProfiles = {
   }
 };
 
+let catalogLimitMap = null;
+// 한국투자증권 공식 목록의 한도 분류(0.7 = 위험자산 70% 한도군, 1 = 100% 편입 가능)를 종목코드로 찾는다.
+function catalogLimitOf(code) {
+  if (!code || typeof window === 'undefined' || !window.KIS_CATALOG?.items) return null;
+  if (!catalogLimitMap) catalogLimitMap = new Map(window.KIS_CATALOG.items.map(entry => [entry.code, entry.limit]));
+  return catalogLimitMap.get(String(code)) ?? null;
+}
+
 function inferredLimitClass(item) {
   if (item.limitClass && item.limitClass !== 'auto') return item.limitClass;
   const name = normalizedName(item.name);
-  if (name.includes('적격tdf')) return 'qualified-tdf';
+  if (name.includes('적격tdf') || (name.includes('tdf') && name.includes('적격'))) return 'qualified-tdf';   // 'RISE TDF2040액티브 적격'처럼 적격이 뒤에 오는 이름도
+  const listed = catalogLimitOf(item.code);
+  if (listed === 1) return 'safe-100';
+  if (listed === 0.7) return 'risk-70';
   if (['정기예금', '현금', '현금성'].includes(item.type)) return 'safe-100';
   if (name === 'won200') return 'risk-70';
   if (item.type === '상품명 확인 필요') return 'unverified';
@@ -195,6 +217,8 @@ async function logoutPrivateSession(options = {}) {
   data = structuredClone(EMPTY_PORTFOLIO);
   kisSnapshot = null;
   trendSnapshot = null;
+  marketStatus = null;
+  ruleTarget = 0.6;
   wooriCatalogue = { items: [], importedAt: null };
   wooriPublicFunds = { items: [], fetchedAt: null };
   productInsightCache.clear();
@@ -242,6 +266,7 @@ function updateAuthPanel() {
       switchView('products', { persist: false });
       updateAuthPanel();
       renderCatalog();
+      void preloadPublicPerformance();
     });
     panel.querySelector('#auth-form').addEventListener('submit', async event => {
       event.preventDefault();
@@ -255,6 +280,7 @@ function updateAuthPanel() {
         saveAuthSession({ ...result, expires_at: Math.floor(Date.now() / 1000) + Number(result.expires_in || 3600) });
         form.reset();
         await loadSupabaseHoldings();
+        void refreshMarketStatus();
         switchView(loadSavedView());
         maybeOfferLocalMigration();
         if (await checkKisConnection()) await refreshKisHoldings({ quiet: true });
@@ -496,14 +522,60 @@ async function fetchKisPerformance(codes) {
   return response;
 }
 
+// 로그인 전 방문자용 공개 수익률: 매일 자동으로 만드는 같은 사이트의 performance.json(공개 시세 기준)을 읽는다.
+// 로그인 사용자의 한국투자증권 조회 경로와 Edge Function은 쓰지 않는다.
+function loadPublicPerformanceFile() {
+  if (!publicPerformancePromise) {
+    publicPerformancePromise = fetch('performance.json', { cache: 'no-cache' })
+      .then(response => {
+        if (!response.ok) throw new Error('공개 수익률 파일을 불러오지 못했습니다.');
+        return response.json();
+      })
+      .catch(error => { publicPerformancePromise = null; throw error; });
+  }
+  return publicPerformancePromise;
+}
+
+async function preloadPublicPerformance() {
+  if (!hostedMode) return;
+  const generation = authGeneration;
+  try {
+    const file = await loadPublicPerformanceFile();
+    if (generation !== authGeneration || !isPublicGuest()) return;
+    for (const [code, entry] of Object.entries(file?.items || {})) {
+      if (productInsightCache.has(code)) continue;
+      productInsightCache.set(code, {
+        candles: (entry.candles || []).map(([date, open, high, low, close]) => ({ date: String(date), open, high, low, close })),
+        periods: entry.periods || {},
+        lastDate: entry.lastDate || null,
+        publicFile: true,
+      });
+    }
+    renderCatalog();
+  } catch (_) { /* 파일을 못 읽어도 검색은 그대로 쓸 수 있다. 수익률만 비어 보인다. */ }
+}
+
 async function fetchPublicPerformance(codes) {
-  const uniqueCodes = [...new Set(codes.filter(code => /^[0-9A-Z]{6}$/.test(code)))].slice(0, 12);
+  const uniqueCodes = [...new Set(codes.filter(code => /^[0-9A-Z]{6}$/.test(code)))];
   if (!uniqueCodes.length) throw new Error('분석할 상장상품 코드가 없습니다.');
-  if (!hostedMode) return fetch(`/api/kis/public-performance?codes=${encodeURIComponent(uniqueCodes.join(','))}`, { cache: 'no-store' });
-  const url = new URL(runtimeConfig.functionUrl);
-  url.searchParams.set('mode', 'public-performance');
-  url.searchParams.set('codes', uniqueCodes.join(','));
-  return fetch(url, { headers: { apikey: runtimeConfig.supabasePublishableKey }, cache: 'no-store' });
+  if (!hostedMode) return fetch(`/api/kis/public-performance?codes=${encodeURIComponent(uniqueCodes.slice(0, 12).join(','))}`, { cache: 'no-store' });
+  const file = await loadPublicPerformanceFile();
+  const entries = file?.items && typeof file.items === 'object' ? file.items : {};
+  const items = uniqueCodes.filter(code => entries[code]).map(code => ({
+    code,
+    candles: (entries[code].candles || []).map(([date, open, high, low, close]) => ({ date: String(date), open, high, low, close })),
+    periods: entries[code].periods || {},
+    lastDate: entries[code].lastDate || null,
+    fetchedAt: file.generatedAt || '',
+  }));
+  const found = new Set(items.map(item => item.code));
+  return new Response(JSON.stringify({
+    source: file.source || '공개 시세',
+    fetchedAt: file.generatedAt || new Date().toISOString(),
+    asOf: file.asOf || null,
+    items,
+    missingCodes: uniqueCodes.filter(code => !found.has(code)),
+  }), { status: 200, headers: { 'content-type': 'application/json; charset=utf-8' } });
 }
 
 async function fetchWooriEtfQuotes(codes) {
@@ -860,7 +932,65 @@ function recommendations() {
       account: holding.account, actionLabel: '보유상품 한도'
     });
   }
+  const ruleItems = [];
+  for (const { account, report } of ruleReports()) {
+    for (const alert of report.alerts) {
+      ruleItems.push({
+        id: `${alert.id}-${account.id}`, kind: 'orange', group: 'loss', icon: '⚑',
+        title: `${accountName(account.id)} · ${alert.title}`, text: alert.text, meta: alert.meta,
+        account: account.id, actionLabel: '규칙 점검'
+      });
+    }
+  }
+  result.unshift(...ruleItems);   // 규칙 알림을 맨 위에, 규칙이 낸 순서(위험 비중, 지수, 장기채)대로
   return result;
+}
+
+function ruleReports() {
+  const rules = typeof window !== 'undefined' ? window.RetirePilotRules : null;
+  if (!rules || isPublicGuest()) return [];
+  const all = visibleHoldings();
+  return data.accounts.map(account => {
+    const holdings = all.filter(item => item.account === account.id);
+    if (!holdings.length) return null;
+    return { account, report: rules.buildReport({ holdings, summary: limitSummary(account.id), market: marketStatus, target: ruleTarget, classify: inferredLimitClass }) };
+  }).filter(Boolean);
+}
+
+async function refreshMarketStatus() {
+  try {
+    const response = await fetch('market.json', { cache: 'no-cache' });
+    if (!response.ok) throw new Error('market.json');
+    marketStatus = await response.json();
+  } catch (_) { marketStatus = null; }
+  render();
+}
+
+function renderRulePanel() {
+  const host = $('#rule-panel');
+  if (!host) return;
+  const rules = window.RetirePilotRules;
+  const signedIn = !hostedMode || Boolean(authSession?.access_token);
+  if (!rules || isPublicGuest() || !signedIn) { host.hidden = true; host.innerHTML = ''; return; }
+  host.hidden = false;
+  const tag = level => ({ crash: ['danger', '급락 경보'], confirmed: ['watch', '규칙 구간'], watch: ['info', '관찰'], normal: ['good', '정상'], unknown: ['info', '확인 불가'] }[level] || ['info', level]);
+  const markets = marketStatus?.indices ? [['코스피', rules.marketRule(marketStatus.indices.kospi)], ['S&P500', rules.marketRule(marketStatus.indices.sp500)]] : [];
+  const marketRows = markets.map(([label, rule]) => {
+    const [cls, text] = tag(rule.level);
+    return `<div class="rule-row"><div><strong>${escapeHtml(rule.title)}</strong><small>${escapeHtml(rule.detail)}</small></div><span class="status-tag ${cls}">${text}</span></div>`;
+  }).join('') || '<div class="rule-row"><div><strong>지수 상태를 불러오지 못했습니다</strong><small>market.json이 없거나 읽지 못했습니다. 지수 규칙은 표시되지 않습니다.</small></div><span class="status-tag info">확인 불가</span></div>';
+  const accountRows = ruleReports().map(({ account, report }) => {
+    const risk = report.risk;
+    const [cls, text] = ({ ok: ['good', '목표 내'], 'below-target': ['info', '목표보다 낮음'], 'above-target': ['watch', '목표 초과'], 'near-limit': ['watch', '한도 근접'], 'over-limit': ['danger', '한도 초과'] }[risk.status]) || ['info', '확인'];
+    const mix = report.mix.total ? `<small>안전자산 중 장기채 추정 ${(report.mix.longShare * 100).toFixed(0)}%</small>` : '';
+    return `<div class="rule-row"><div><strong>${escapeHtml(account.name)} · ${escapeHtml(risk.title)}</strong><small>${escapeHtml(risk.detail)}</small>${mix}</div><span class="status-tag ${cls}">${text}</span></div>`;
+  }).join('') || '<div class="rule-row"><div><strong>보유상품이 없습니다</strong><small>상품을 추가하거나 잔고를 조회하면 규칙을 점검합니다.</small></div></div>';
+  const stale = marketStatus && rules.buildReport({ holdings: [], summary: null, market: marketStatus }).stale;
+  const asOf = marketStatus?.asOf ? rules.dateText(marketStatus.asOf) : '';
+  const options = [50, 55, 60, 65, 70].map(value => `<option value="${value}"${Math.round(ruleTarget * 100) === value ? ' selected' : ''}>${value}%</option>`).join('');
+  host.innerHTML = `<div class="panel-head"><div><h3>운용 규칙 점검</h3><p>지수 200일선·급락 경보와 위험자산 비중입니다. 주문이 아니라 점검용 알림입니다.</p></div><label class="rule-target">목표 위험자산<select id="rule-target">${options}</select></label></div>
+    <div class="rule-list">${marketRows}${accountRows}</div>
+    <small class="rule-foot">${asOf ? `지수 기준일 ${escapeHtml(asOf)}${stale ? ' · 오래된 데이터입니다. 규칙 알림을 쓰지 않습니다.' : ''} · ` : ''}과거 시험 결과이며 미래 수익을 보장하지 않습니다. 개인 맞춤 투자 조언이 아닙니다.</small>`;
 }
 
 function trendRate(value) {
@@ -1281,6 +1411,7 @@ function renderLimitSimulation() {
 
 function render() {
   updateWooriImportPanel();
+  renderRulePanel();
   renderTotals();
   renderHoldings();
   renderRecommendations();
@@ -1373,7 +1504,7 @@ function catalogCard(item, account, { publicList = false } = {}) {
   const status = holding
     ? `<span class="status-tag good">보유 중 · ${weight(holding).toFixed(1)}%</span>`
     : `<span class="status-tag info">${publicList ? '회사 라인업 확인 필요' : '주문 가능 미확인'}</span>`;
-  const analyzed = catalogPerformance.account === account && catalogPerformance.codes.has(item.code);
+  const analyzed = (catalogPerformance.account === account && catalogPerformance.codes.has(item.code)) || (isPublicGuest() && Boolean(productInsightCache.get(item.code)?.publicFile));
   const performance = analyzed ? `<div class="catalog-performance"><span>1개월 <b>${insightRate(periods.oneMonth)}</b></span><span>3개월 <b>${insightRate(periods.threeMonths)}</b></span><span>6개월 <b>${insightRate(periods.sixMonths)}</b></span></div>` : '';
   return `<article class="catalog-card catalog-card-row">
     <button class="catalog-card-main catalog-card-button" type="button" ${attributes}><div><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(detailKey.startsWith('fund:') ? '상품코드 미확인' : detailKey)} · ${escapeHtml(catalogProductType(item))} · ${escapeHtml(manager)}</span></div><div class="catalog-card-right">${status}<small>${escapeHtml(fee)} · 상세 보기</small></div></button>
@@ -1394,16 +1525,16 @@ function renderPerformanceSearch() {
   const button = $('#catalog-performance-btn');
   if (!host || !button) return;
   const account = $('#catalog-account').value;
-  host.hidden = account === 'woori-dc';
-  if (host.hidden) return;
   const guest = isPublicGuest();
+  host.hidden = account === 'woori-dc' || guest;
+  if (host.hidden) return;
   button.disabled = catalogPerformance.loading;
   button.textContent = catalogPerformance.loading ? '수익률 조회 중…' : guest ? '공개 분석 보기' : '현재 결과 분석';
   host.classList.toggle('is-loading', catalogPerformance.loading);
   const message = host.querySelector('p');
   if (catalogPerformance.error) message.textContent = catalogPerformance.error;
   else if (catalogPerformance.codes.size) message.textContent = `${catalogPerformance.codes.size}개 후보를 분석했습니다. 3개월 수익률순이며 1·6개월 흐름도 함께 확인하세요.`;
-  else message.textContent = `${guest ? '로그인 사용자가 갱신한 공개 캐시를 사용합니다. ' : ''}한 번에 최대 12개까지 분석할 수 있습니다. 상품명·테마로 검색 결과를 12개 이하로 좁혀주세요.`;
+  else message.textContent = `${guest ? '매일 갱신되는 공개 시세 파일을 사용합니다. ' : ''}한 번에 최대 12개까지 분석할 수 있습니다. 상품명·테마로 검색 결과를 12개 이하로 좁혀주세요.`;
 }
 
 async function analyzeCatalogPerformance() {
@@ -1428,8 +1559,8 @@ async function analyzeCatalogPerformance() {
     const returned = new Set(result.items.map(item => item.code));
     result.items.forEach(item => productInsightCache.set(item.code, item.error ? { error: item.error, periods: {} } : item));
     const missing = codes.filter(code => !returned.has(code));
-    missing.forEach(code => productInsightCache.set(code, { error: '공개 분석 정보 준비 중', periods: {} }));
-    const error = missing.length ? `${missing.length}개 상품은 공개 분석 정보 준비 중입니다. 로그인 후 분석하면 공개 캐시가 갱신됩니다.` : '';
+    missing.forEach(code => productInsightCache.set(code, { error: '공개 시세 파일에 없는 상품입니다', periods: {} }));
+    const error = missing.length ? `${missing.length}개 상품은 공개 시세 파일에 없습니다(신규 상장 등). 로그인하면 한국투자증권 시세로 분석할 수 있습니다.` : '';
     catalogPerformance = { account: 'k-invest', codes: new Set(codes), loading: false, error, fetchedAt: result.fetchedAt || new Date().toISOString() };
     $('#catalog-sort').value = 'return3';
     renderCatalog();
@@ -1468,7 +1599,7 @@ async function loadComparisonInsight(item) {
     const result = await response.json();
     if (generation !== authGeneration) return;
     const insight = guest ? result.items?.find(candidate => candidate.code === item.code) : result;
-    if (!response.ok || !insight?.periods) throw new Error(result.error || '공개 분석 정보 준비 중');
+    if (!response.ok || !insight?.periods) throw new Error(result.error || '공개 시세 파일에 없는 상품입니다');
     productInsightCache.set(item.code, insight);
   } catch (error) {
     productInsightCache.set(item.code, { error: error.message, periods: {} });
@@ -1833,7 +1964,7 @@ async function openProductDetail(context) {
     if (generation !== authGeneration) return;
     if (!response.ok) throw new Error(result.error || '가격 정보를 불러오지 못했습니다.');
     const insight = guest ? result.items?.find(candidate => candidate.code === context.code) : result;
-    if (!Array.isArray(insight?.candles) || !insight?.periods) throw new Error(guest ? '공개 분석 정보 준비 중입니다. 로그인 후 분석하면 공개 캐시가 갱신됩니다.' : '상세 가격 분석 기능이 아직 배포되지 않았습니다.');
+    if (!Array.isArray(insight?.candles) || !insight?.periods) throw new Error(guest ? '공개 시세 파일에 없는 상품입니다(신규 상장 등). 로그인하면 한국투자증권 시세로 볼 수 있습니다.' : '상세 가격 분석 기능이 아직 배포되지 않았습니다.');
     productInsightCache.set(context.code, insight);
   } catch (error) {
     if (generation !== authGeneration) return;
@@ -2037,6 +2168,15 @@ $('#product-form').addEventListener('submit', async event => {
   }
 });
 
+document.addEventListener('change', event => {
+  if (event.target?.id !== 'rule-target') return;
+  const value = Number(event.target.value) / 100;
+  if (!(value >= 0.5 && value <= 0.7)) return;
+  ruleTarget = value;
+  try { localStorage.setItem(RULE_TARGET_KEY, String(value)); } catch (_) { /* 저장은 선택 */ }
+  render();
+});
+
 $('#refresh-btn').addEventListener('click', () => { render(); toast('저장된 입력 데이터를 다시 표시했습니다.'); });
 function resetCatalogPerformanceSearch() {
   catalogPerformance = { account: '', codes: new Set(), loading: false, error: '', fetchedAt: '' };
@@ -2071,10 +2211,12 @@ checkKisConnection().then(async ready => {
   if (hostedMode && ready) {
     try {
       await loadSupabaseHoldings();
+      void refreshMarketStatus();
       maybeOfferLocalMigration();
     } catch (error) {
       toast(error.message);
     }
   }
+  if (!hostedMode) void refreshMarketStatus();
   if (ready) refreshKisHoldings({ quiet: true });
 });

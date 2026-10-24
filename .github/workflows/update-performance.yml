@@ -1,0 +1,38 @@
+name: Update public performance data
+
+on:
+  schedule:
+    - cron: "0 10 * * 1-5"   # 19:00 KST on weekdays, after the closing prices are final
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-performance
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Install pinned dependencies
+        run: pip install finance-datareader==0.9.202 pandas==2.3.3 lxml==6.1.3
+      - name: Build performance.json and market.json from public prices
+        run: python scripts/build_performance_json.py
+      - name: Commit only when the data changed
+        run: |
+          if [ -n "$(git status --porcelain performance.json market.json)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add performance.json market.json
+            git commit -m "Update public performance data"
+            git push
+          else
+            echo "performance.json and market.json unchanged"
+          fi
